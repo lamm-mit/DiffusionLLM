@@ -278,7 +278,7 @@ Add these arguments to any `diffusion-llm train` command:
 
 ```bash
   --push-to-hub \
-  --hub-model-id YOUR_HF_USERNAME/qwen2.5-1.5b-diffusion-ultrachat \
+  --hub-model-id lamm-mit/qwen2.5-1.5b-diffusion-ultrachat \
   --hub-strategy every_save
 ```
 
@@ -295,7 +295,7 @@ For example, the end of the substantial training command can be:
   --gradient-checkpointing \
   --bf16 \
   --push-to-hub \
-  --hub-model-id YOUR_HF_USERNAME/qwen2.5-1.5b-diffusion-ultrachat \
+  --hub-model-id lamm-mit/qwen2.5-1.5b-diffusion-ultrachat \
   --hub-strategy every_save
 ```
 
@@ -305,9 +305,11 @@ Upload a completed numbered checkpoint to the root of a model repository:
 
 ```bash
 uv run hf upload \
-  YOUR_HF_USERNAME/qwen2.5-1.5b-diffusion-ultrachat \
+  lamm-mit/qwen2.5-1.5b-diffusion-ultrachat \
   artifacts/qwen2.5-1.5b-diffusion-ultrachat/checkpoint-500 \
   . \
+  --exclude "*.pt" \
+  --exclude "*.pth" \
   --commit-message "Upload diffusion checkpoint 500"
 ```
 
@@ -320,32 +322,38 @@ Upload it while excluding the large local Trainer checkpoint directories:
 
 ```bash
 uv run hf upload \
-  YOUR_HF_USERNAME/qwen2.5-1.5b-diffusion-ultrachat \
+  lamm-mit/qwen2.5-1.5b-diffusion-ultrachat \
   artifacts/qwen2.5-1.5b-diffusion-ultrachat \
   . \
   --exclude "checkpoint-*" \
   --commit-message "Upload final diffusion model"
 ```
 
-### Download from the Hub for inference
+### Generate from the automatically pushed model
 
-The Hub hosts checkpoint files, not this inference implementation. On another
-machine, install DiffusionLLM and generate directly from the model ID:
+When training used `--push-to-hub` and `--hub-strategy every_save`, the model
+repository root contains the latest successfully uploaded model. The Hub hosts
+the checkpoint files, not this inference implementation. On another machine,
+install DiffusionLLM and generate directly from the model ID:
 
 ```bash
 git clone https://github.com/lamm-mit/DiffusionLLM.git
 cd DiffusionLLM
 uv sync --python 3.12
 
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
 CUDA_VISIBLE_DEVICES=0 \
 uv run diffusion-llm generate \
-  --model YOUR_HF_USERNAME/qwen2.5-1.5b-diffusion-ultrachat \
-  --prompt "Explain masked diffusion in simple terms." \
+  --model lamm-mit/qwen2.5-1.5b-diffusion-ultrachat \
+  --prompt "What are some common mistakes that leaders make, and how can they be avoided?" \
   --chat-template \
-  --max-new-tokens 128 \
-  --steps 64 \
+  --max-new-tokens 192 \
+  --steps 96 \
   --block-size 32 \
-  --device cuda:0
+  --temperature 0.2 \
+  --device cuda:0 \
+  --gif artifacts/hub-leadership-denoising.gif \
+  --gif-frame-duration-ms 100
 ```
 
 For a private model, run `uv run hf auth login` on the inference machine as
