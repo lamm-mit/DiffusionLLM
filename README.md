@@ -476,8 +476,15 @@ Could not convert Encoding(...) with type tokenizers.Encoding
 ```
 
 comes from a fast tokenizer returning an `Encoding` object where older
-DiffusionLLM versions expected `list[int]`. Current versions normalize both
-forms. Update and resynchronize before restarting:
+DiffusionLLM versions expected `list[int]`. The same incompatibility can appear
+during `generate --chat-template` as:
+
+```text
+TypeError: 'str' object cannot be interpreted as an integer
+```
+
+Current versions normalize tokenizer outputs in both training and inference.
+Update and resynchronize before restarting:
 
 ```bash
 git pull

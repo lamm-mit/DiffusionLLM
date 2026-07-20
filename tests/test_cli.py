@@ -10,14 +10,26 @@ from diffusion_llm import cli
 from diffusion_llm.sampling import SamplerOutput
 
 
+class FakeEncoding:
+    def __init__(self, ids: list[int]):
+        self.ids = ids
+
+
 class ToyTokenizer:
     mask_token_id = 9
     pad_token_id = 0
     eos_token_id = 1
     eot_token_id = None
+    chat_template = "present"
 
     def encode(self, text, add_special_tokens=True):
         return [2, 3]
+
+    def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+        assert messages == [{"role": "user", "content": "Prompt:"}]
+        assert tokenize
+        assert add_generation_prompt
+        return FakeEncoding([2, 3])
 
     def decode(self, token_ids, skip_special_tokens=False):
         pieces = {2: "Prompt", 3: ":", 4: " generated", 9: "<mask>"}
@@ -56,6 +68,7 @@ def test_generate_cli_writes_gif(
             "unused",
             "--prompt",
             "Prompt:",
+            "--chat-template",
             "--max-new-tokens",
             "4",
             "--steps",

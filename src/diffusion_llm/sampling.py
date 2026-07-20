@@ -14,6 +14,7 @@ import torch
 import torch.nn.functional as F
 
 from diffusion_llm.schedule import reveal_counts
+from diffusion_llm.tokenization import token_id_list
 
 
 @dataclass
@@ -37,12 +38,14 @@ def encode_prompt(
         if not getattr(tokenizer, "chat_template", None):
             raise ValueError("This tokenizer has no chat template; use a raw prompt.")
         messages = messages or [{"role": "user", "content": prompt or ""}]
-        return tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
+        return token_id_list(
+            tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+            )
         )
-    return tokenizer.encode(prompt or "", add_special_tokens=True)
+    return token_id_list(tokenizer.encode(prompt or "", add_special_tokens=True))
 
 
 def _sample_predictions(logits: torch.Tensor, temperature: float) -> torch.Tensor:
