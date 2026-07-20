@@ -4,16 +4,16 @@
 
 A decoder-only AR model normally uses the factorization
 
-$$
+```math
 p(x)=\prod_i p(x_i\mid x_{<i}),
-$$
+```
 
 implemented by a lower-triangular causal attention mask. Masked diffusion needs
 each noised position to use information on both sides:
 
-$$
+```math
 p_\theta(x_{0,i}\mid x_t).
-$$
+```
 
 The converter keeps the tokenizer, embeddings, transformer blocks, LM head,
 and pretrained weights. It changes the model configuration and replaces the
@@ -30,19 +30,19 @@ denoise a mask token.
 Let $x_0$ be a clean sequence and $t\in[\epsilon,1]$ a sampled time. The
 linear schedule is
 
-$$
+```math
 \alpha(t)=1-t.
-$$
+```
 
 At each trainable position $i$, independently sample:
 
-$$
+```math
 x_{t,i} =
 \begin{cases}
 x_{0,i} & \text{with probability } \alpha(t),\\
 \texttt{[MASK]} & \text{with probability } 1-\alpha(t)=t.
 \end{cases}
-$$
+```
 
 SFT prompt tokens use label `-100`. They remain clean conditioning context and
 are never selected for corruption or loss. Padding is likewise excluded.
@@ -55,13 +55,13 @@ short.
 
 For a continuous-time masked diffusion model, the schedule weight is
 
-$$
+```math
 w(t)=\frac{-\alpha'(t)}{1-\alpha(t)}.
-$$
+```
 
 With the linear schedule, $w(t)=1/t$. The estimator used here is:
 
-$$
+```math
 \mathcal{L}
 =
 \frac{1}{N}
@@ -70,7 +70,7 @@ w(t)\,\mathrm{CE}\left(
 p_\theta(\cdot\mid x_t)_i,
 x_{0,i}
 \right),
-$$
+```
 
 where $M_t$ contains corrupted target positions and $N$ is the number of
 non-padding target tokens. `--loss-weighting uniform` is available as a useful

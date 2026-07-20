@@ -231,7 +231,7 @@ $\alpha(t)=1-t$, so each trainable token is independently replaced by the
 mask token with probability $t$. The bidirectional model predicts the clean
 token at every masked position. The continuous-time objective is:
 
-$$
+```math
 \mathcal{L}
 =
 \mathbb{E}_{t,x_t}
@@ -240,7 +240,7 @@ $$
 \sum_{i \in M_t}
 -\log p_\theta(x_{0,i}\mid x_t)
 \right].
-$$
+```
 
 During generation, the model starts with a fixed canvas of masks. Each step
 predicts every unresolved position, ranks the predictions by confidence, and
