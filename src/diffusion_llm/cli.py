@@ -128,6 +128,26 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--lora-dropout", type=float, default=0.05)
     train_parser.add_argument("--report-to", default="none", help="none, wandb, tensorboard, ...")
     train_parser.add_argument("--resume-from-checkpoint")
+    train_parser.add_argument(
+        "--push-to-hub",
+        action="store_true",
+        help="Upload saved and final models to the Hugging Face Hub.",
+    )
+    train_parser.add_argument(
+        "--hub-model-id",
+        help="Destination model repository, for example username/model-name.",
+    )
+    train_parser.add_argument(
+        "--hub-private",
+        action="store_true",
+        help="Create the destination repository as private.",
+    )
+    train_parser.add_argument(
+        "--hub-strategy",
+        choices=("end", "every_save", "checkpoint", "all_checkpoints"),
+        default="every_save",
+        help="What to upload and when; every_save keeps the repository root current.",
+    )
     train_parser.set_defaults(handler=_run_train)
 
     generate = commands.add_parser("generate", help="Run one-shot diffusion generation.")

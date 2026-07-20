@@ -63,6 +63,10 @@ class TrainConfig:
     lora_dropout: float = 0.05
     report_to: str = "none"
     resume_from_checkpoint: str | None = None
+    push_to_hub: bool = False
+    hub_model_id: str | None = None
+    hub_private: bool = False
+    hub_strategy: str = "every_save"
 
 
 class MDLMTrainer(Trainer):
@@ -155,12 +159,57 @@ def _apply_lora(model: torch.nn.Module, config: TrainConfig) -> torch.nn.Module:
     return model
 
 
+def _build_training_arguments(
+    config: TrainConfig,
+    output_dir: Path,
+    *,
+    has_eval: bool,
+) -> TrainingArguments:
+    """Translate the stable project config into Transformers arguments."""
+    report_targets = [] if config.report_to in {"", "none"} else config.report_to.split(",")
+    return TrainingArguments(
+        output_dir=str(output_dir),
+        num_train_epochs=config.epochs,
+        max_steps=config.max_steps,
+        learning_rate=config.learning_rate,
+        weight_decay=config.weight_decay,
+        warmup_ratio=config.warmup_ratio,
+        per_device_train_batch_size=config.batch_size,
+        per_device_eval_batch_size=config.eval_batch_size,
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
+        logging_steps=config.logging_steps,
+        logging_first_step=True,
+        save_strategy="steps",
+        save_steps=config.save_steps,
+        save_total_limit=config.save_total_limit,
+        eval_strategy="steps" if has_eval else "no",
+        eval_steps=config.eval_steps if has_eval else None,
+        prediction_loss_only=True,
+        bf16=config.bf16,
+        fp16=config.fp16,
+        gradient_checkpointing=config.gradient_checkpointing,
+        report_to=report_targets,
+        remove_unused_columns=False,
+        dataloader_pin_memory=torch.cuda.is_available(),
+        seed=config.seed,
+        data_seed=config.seed,
+        push_to_hub=config.push_to_hub,
+        hub_model_id=config.hub_model_id,
+        hub_private_repo=config.hub_private,
+        hub_strategy=config.hub_strategy,
+    )
+
+
 def train(config: TrainConfig) -> Path:
     """Prepare data, train the converted model, and save a final checkpoint."""
     if config.mode not in {"pretrain", "sft"}:
         raise ValueError("mode must be 'pretrain' or 'sft'.")
     if config.bf16 and config.fp16:
         raise ValueError("Choose at most one of bf16 and fp16.")
+    if config.push_to_hub and not config.hub_model_id:
+        raise ValueError("--push-to-hub requires --hub-model-id.")
+    if not config.push_to_hub and (config.hub_model_id or config.hub_private):
+        raise ValueError("--hub-model-id and --hub-private require --push-to-hub.")
     set_seed(config.seed)
 
     output_dir = Path(config.output).expanduser().resolve()
@@ -204,34 +253,7 @@ def train(config: TrainConfig) -> Path:
         )
 
     has_eval = eval_dataset is not None and len(eval_dataset) > 0
-    report_targets = [] if config.report_to in {"", "none"} else config.report_to.split(",")
-    training_args = TrainingArguments(
-        output_dir=str(output_dir),
-        num_train_epochs=config.epochs,
-        max_steps=config.max_steps,
-        learning_rate=config.learning_rate,
-        weight_decay=config.weight_decay,
-        warmup_ratio=config.warmup_ratio,
-        per_device_train_batch_size=config.batch_size,
-        per_device_eval_batch_size=config.eval_batch_size,
-        gradient_accumulation_steps=config.gradient_accumulation_steps,
-        logging_steps=config.logging_steps,
-        logging_first_step=True,
-        save_strategy="steps",
-        save_steps=config.save_steps,
-        save_total_limit=config.save_total_limit,
-        eval_strategy="steps" if has_eval else "no",
-        eval_steps=config.eval_steps if has_eval else None,
-        prediction_loss_only=True,
-        bf16=config.bf16,
-        fp16=config.fp16,
-        gradient_checkpointing=config.gradient_checkpointing,
-        report_to=report_targets,
-        remove_unused_columns=False,
-        dataloader_pin_memory=torch.cuda.is_available(),
-        seed=config.seed,
-        data_seed=config.seed,
-    )
+    training_args = _build_training_arguments(config, output_dir, has_eval=has_eval)
     trainer = MDLMTrainer(
         model=model,
         args=training_args,
@@ -244,10 +266,10 @@ def train(config: TrainConfig) -> Path:
         loss_weighting=config.loss_weighting,
     )
     trainer.train(resume_from_checkpoint=config.resume_from_checkpoint)
-    trainer.save_model(str(output_dir))
-    tokenizer.save_pretrained(output_dir)
     (output_dir / "training_config.json").write_text(
         json.dumps(asdict(config), indent=2) + "\n",
         encoding="utf-8",
     )
+    tokenizer.save_pretrained(output_dir)
+    trainer.save_model(str(output_dir))
     return output_dir

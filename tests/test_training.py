@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import torch
 from datasets import Dataset
 from datasets import config as datasets_config
@@ -13,7 +14,13 @@ from diffusion_llm.collator import DiffusionDataCollator
 from diffusion_llm.conversion import convert_checkpoint
 from diffusion_llm.loading import load_model, load_tokenizer
 from diffusion_llm.sampling import MaskedDiffusionSampler
-from diffusion_llm.training import MDLMTrainer, TrainConfig, _apply_lora, train
+from diffusion_llm.training import (
+    MDLMTrainer,
+    TrainConfig,
+    _apply_lora,
+    _build_training_arguments,
+    train,
+)
 
 
 def test_one_diffusion_loss_backward(
@@ -67,6 +74,37 @@ def test_lora_wraps_diffusion_model(
     trainable = [name for name, parameter in wrapped.named_parameters() if parameter.requires_grad]
     assert trainable
     assert all("lora_" in name for name in trainable)
+
+
+def test_hub_training_arguments_are_forwarded(tmp_path: Path) -> None:
+    config = TrainConfig(
+        model="base",
+        dataset="data",
+        output=str(tmp_path),
+        push_to_hub=True,
+        hub_model_id="lamm-mit/classroom-diffusion",
+        hub_private=True,
+        hub_strategy="checkpoint",
+    )
+
+    arguments = _build_training_arguments(config, tmp_path, has_eval=False)
+
+    assert arguments.push_to_hub
+    assert arguments.hub_model_id == "lamm-mit/classroom-diffusion"
+    assert arguments.hub_private_repo
+    assert arguments.hub_strategy.value == "checkpoint"
+
+
+def test_push_to_hub_requires_model_id(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="--hub-model-id"):
+        train(
+            TrainConfig(
+                model="unused",
+                dataset="unused",
+                output=str(tmp_path),
+                push_to_hub=True,
+            )
+        )
 
 
 def test_end_to_end_one_step_training(

@@ -22,6 +22,7 @@ training it, and generating text by iterative denoising.
 - Parallel and blockwise iterative denoising.
 - Chat-template-aware SFT and inference.
 - Animated GIF export of the complete denoising trajectory.
+- Optional automatic model and checkpoint uploads to the Hugging Face Hub.
 - Local files, saved `datasets` directories, and Hugging Face Hub datasets.
 - Offline unit tests, attention tests, and an end-to-end training test.
 
@@ -250,6 +251,51 @@ uv run diffusion-llm generate \
 Wait until a checkpoint directory has finished writing before loading it.
 Within the sampling process, the isolated physical RTX 5000 Ada is likewise
 renumbered to `cuda:0`.
+
+Before using `--push-to-hub`, authenticate once with a write-capable token:
+
+```bash
+uv run hf auth login
+```
+
+To enable uploads in the substantial recipe, replace its final `--bf16` line
+with:
+
+```bash
+  --bf16 \
+  --push-to-hub \
+  --hub-model-id YOUR_HF_USERNAME/qwen2.5-1.5b-diffusion-ultrachat \
+  --hub-strategy every_save
+```
+
+`every_save` asynchronously updates the model at the repository root whenever
+`--save-steps` triggers, then performs a blocking final upload. Use
+`--hub-strategy end` to upload only the final model, `checkpoint` to also keep
+the latest resumable state under `last-checkpoint`, or `all_checkpoints` to
+retain every numbered checkpoint. Add `--hub-private` when creating a private
+repository. Privacy cannot be changed by the flag after a repository exists.
+
+The Hub hosts checkpoint files, not this inference implementation. On another
+machine, install DiffusionLLM and generate directly from the model ID:
+
+```bash
+git clone https://github.com/lamm-mit/DiffusionLLM.git
+cd DiffusionLLM
+uv sync --python 3.12
+
+CUDA_VISIBLE_DEVICES=0 \
+uv run diffusion-llm generate \
+  --model YOUR_HF_USERNAME/qwen2.5-1.5b-diffusion-ultrachat \
+  --prompt "Explain masked diffusion in simple terms." \
+  --chat-template \
+  --max-new-tokens 128 \
+  --steps 64 \
+  --block-size 32 \
+  --device cuda:0
+```
+
+For a private model, run `uv run hf auth login` on the inference machine as
+well, or provide a read token through the `HF_TOKEN` environment variable.
 
 This is a serious baseline with a reasonable chance of producing a useful
 classroom model, but it is not a quality guarantee. Evaluate held-out MDLM

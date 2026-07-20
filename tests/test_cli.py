@@ -86,3 +86,28 @@ def test_generate_cli_writes_gif(
     assert "generated" in output
     assert str(gif_path) in output
     assert gif_path.exists()
+
+
+def test_train_cli_parses_hub_options() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "train",
+            "--model",
+            "base",
+            "--dataset",
+            "data",
+            "--output",
+            "output",
+            "--push-to-hub",
+            "--hub-model-id",
+            "lamm-mit/classroom-diffusion",
+            "--hub-private",
+            "--hub-strategy",
+            "checkpoint",
+        ]
+    )
+
+    assert args.push_to_hub
+    assert args.hub_model_id == "lamm-mit/classroom-diffusion"
+    assert args.hub_private
+    assert args.hub_strategy == "checkpoint"
