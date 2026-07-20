@@ -4,7 +4,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 
-A focused, course-oriented codebase for converting a small decoder-only
+A codebase for converting a small decoder-only
 autoregressive language model into a masked diffusion language model (MDLM),
 training it, and generating text by iterative denoising.
 
@@ -196,8 +196,7 @@ uv run diffusion-llm convert \
   --dtype bfloat16
 ```
 
-On a machine where `nvidia-smi` lists an RTX 5000 Ada as physical GPU 0 and an
-RTX 6000 Ada as physical GPU 1, isolate training to the 6000:
+On a machine with multiple GPUs you can isolate training to one of the GPUs and use the other for inference/testing and benchmarking while training:
 
 ```bash
 CUDA_DEVICE_ORDER=PCI_BUS_ID \
@@ -236,8 +235,7 @@ Inside this process, the physical RTX 6000 Ada is intentionally renumbered to
 `cuda:0`. Only one GPU is visible, so Transformers does not activate
 `DataParallel`.
 
-In a second terminal, sample a completed numbered checkpoint on physical GPU 0,
-the RTX 5000 Ada:
+In a second terminal, sample a completed numbered checkpoint on a second physical GPU 0:
 
 ```bash
 CUDA_DEVICE_ORDER=PCI_BUS_ID \
@@ -254,15 +252,6 @@ uv run diffusion-llm generate \
   --gif artifacts/ultrachat-denoising.gif \
   --gif-frame-duration-ms 140
 ```
-
-Wait until a checkpoint directory has finished writing before loading it.
-Within the sampling process, the isolated physical RTX 5000 Ada is likewise
-renumbered to `cuda:0`.
-
-This is a serious baseline with a reasonable chance of producing a useful
-classroom model, but it is not a quality guarantee. Evaluate held-out MDLM
-loss, response quality, repetition, instruction following, and speed against
-the original AR checkpoint.
 
 ## Push models to the Hugging Face Hub
 
@@ -355,6 +344,8 @@ uv run diffusion-llm generate \
   --gif artifacts/hub-leadership-denoising.gif \
   --gif-frame-duration-ms 100
 ```
+
+![alt text](assets/hub-leadership-denoising.gif)
 
 For a private model, run `uv run hf auth login` on the inference machine as
 well, or provide a read token through the `HF_TOKEN` environment variable.
@@ -467,7 +458,7 @@ not use a learned time embedding, and is not an exact ancestral sampler for a
 general discrete transition matrix.
 
 See [docs/method.md](docs/method.md) for the longer derivation and
-[docs/classroom-lab.md](docs/classroom-lab.md) for a teaching lab.
+[docs/classroom-lab.md](docs/classroom-lab.md) for a lab to get started locally and explore the code and associated method.
 
 ## Command reference
 
@@ -513,87 +504,6 @@ The suite checks:
 - diffusion loss is finite and differentiable; and
 - conversion, local data, training, save, reload, and generation work together.
 
-## Troubleshooting
-
-### Triton fails with `Python.h: No such file or directory`
-
-A traceback ending in a command similar to:
-
-```text
-gcc ... cuda_utils.c ... fatal error: Python.h: No such file or directory
-```
-
-means PyTorch/Triton tried to compile a CUDA helper, but the machine lacks the
-development headers for the selected Python. It is not a diffusion-model loss
-failure.
-
-For repository tests, use CPU:
-
-```bash
-CUDA_VISIBLE_DEVICES="" uv run pytest
-```
-
-For GPU training on Ubuntu, install the matching headers and confirm the
-include directory:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y build-essential python3.12-dev
-uv run python -c 'import sysconfig; print(sysconfig.get_path("include"))'
-```
-
-If `python3.12-dev` is unavailable, either enable a repository that provides
-it or use the host's supported Python and matching headers:
-
-```bash
-sudo apt-get install -y build-essential python3-dev
-uv sync --python "$(command -v python3)"
-```
-
-The project supports Python 3.10 and newer.
-
-### Multiple GPUs have unequal memory
-
-PyTorch may warn that one GPU has less than 75% of another GPU's memory or
-cores. Do not expose both the 32 GB RTX 5000 Ada and 48 GB RTX 6000 Ada to the
-same training process. Select the 6000 for training:
-
-```bash
-CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 \
-uv run diffusion-llm train \
-  ...
-```
-
-Use `CUDA_VISIBLE_DEVICES=0` in a separate process for sampling. A selected
-physical device is presented to that process as `cuda:0`. The
-`warmup_ratio is deprecated` message in Transformers is a separate warning and
-is not the cause of the missing-header failure.
-
-### Arrow overflow mentions `tokenizers.Encoding`
-
-An error such as:
-
-```text
-OverflowError: Try to reduce writer_batch_size ...
-Could not convert Encoding(...) with type tokenizers.Encoding
-```
-
-comes from a fast tokenizer returning an `Encoding` object where older
-DiffusionLLM versions expected `list[int]`. The same incompatibility can appear
-during `generate --chat-template` as:
-
-```text
-TypeError: 'str' object cannot be interpreted as an integer
-```
-
-Current versions normalize tokenizer outputs in both training and inference.
-Update and resynchronize before restarting:
-
-```bash
-git pull
-uv sync
-```
-
 ## Project layout
 
 ```text
@@ -615,7 +525,7 @@ DiffusionLLM/
 
 ## Scope and limitations
 
-- Short classroom runs do not reproduce published diffusion-LLM quality.
+- Short runs do not reproduce published diffusion-LLM quality.
 - Only Qwen2/Qwen2.5, Qwen3, and Llama-family decoder layouts are supported.
 - Diffusion inference performs repeated full-sequence forward passes and is
   slower than optimized production kernels.

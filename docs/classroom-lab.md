@@ -1,8 +1,8 @@
-# Classroom lab: turn a small AR model into a diffusion model
+# Getting started: turn a small AR model into a diffusion model
 
-## Learning objectives
+## Objectives
 
-Students should be able to:
+These examples allow you to:
 
 1. explain why a causal decoder cannot denoise arbitrary masked positions;
 2. distinguish checkpoint conversion from diffusion training;
