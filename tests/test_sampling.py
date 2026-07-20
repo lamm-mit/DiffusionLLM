@@ -36,7 +36,12 @@ def test_sampler_preserves_prompt_and_resolves_masks() -> None:
         max_new_tokens=5,
         steps=3,
         block_size=5,
+        return_history=True,
     )
     assert output.sequences[0, :2].tolist() == [2, 3]
     assert output.sequences[0, 2:].tolist() == [4, 4, 4, 4, 4]
     assert not output.sequences.eq(ToyTokenizer.mask_token_id).any()
+    assert output.histories is not None
+    assert len(output.histories) == 4
+    assert output.histories[0][0, 2:].eq(ToyTokenizer.mask_token_id).all()
+    assert not output.histories[-1].eq(ToyTokenizer.mask_token_id).any()

@@ -138,6 +138,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Wrap the prompt as a user message with the tokenizer's chat template.",
     )
+    generate.add_argument(
+        "--gif",
+        metavar="PATH",
+        help="Save an animated GIF showing the iterative denoising trajectory.",
+    )
+    generate.add_argument(
+        "--gif-frame-duration-ms",
+        type=int,
+        default=220,
+        help="Duration of intermediate GIF frames in milliseconds.",
+    )
     generate.add_argument("--json", action="store_true", help="Emit a machine-readable result.")
     generate.set_defaults(handler=_run_generate)
 
@@ -206,8 +217,23 @@ def _run_generate(args: argparse.Namespace) -> None:
         args.prompt,
         chat_template=args.chat_template,
     )
-    output = sampler.sample([prompt_ids], **_sample_kwargs(args))
+    output = sampler.sample(
+        [prompt_ids],
+        return_history=args.gif is not None,
+        **_sample_kwargs(args),
+    )
     text = decode_generations(tokenizer, output)[0]
+    gif_path = None
+    if args.gif:
+        from diffusion_llm.visualization import save_denoising_gif
+
+        gif_path = save_denoising_gif(
+            tokenizer,
+            output,
+            args.gif,
+            prompt=args.prompt,
+            frame_duration_ms=args.gif_frame_duration_ms,
+        )
     if args.json:
         print(
             json.dumps(
@@ -216,12 +242,15 @@ def _run_generate(args: argparse.Namespace) -> None:
                     "text": text,
                     "prompt_tokens": len(prompt_ids),
                     "generated_tokens": args.max_new_tokens,
+                    "gif": str(gif_path) if gif_path else None,
                 },
                 ensure_ascii=False,
             )
         )
     else:
         print(text)
+        if gif_path:
+            print(f"\nDenoising GIF: {gif_path}")
 
 
 def _run_chat(args: argparse.Namespace) -> None:

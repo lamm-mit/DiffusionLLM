@@ -24,6 +24,7 @@ dependencies = [
     "accelerate>=1.11,<2",
     "datasets>=4.2,<5",
     "peft>=0.17,<1",
+    "pillow>=10,<13",
     "safetensors>=0.5",
     "torch>=2.6",
     "transformers>=5.13,<6",

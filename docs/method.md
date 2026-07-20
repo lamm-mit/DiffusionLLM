@@ -79,7 +79,18 @@ classroom ablation but is not the schedule-weighted MDLM objective.
 No right shift is applied: logits at position $i$ predict the clean token at
 position $i$. That is different from causal language modeling.
 
-## 4. Reverse process
+## 4. Time and position encoding
+
+Diffusion time is not an input to the network. It controls the sampled mask
+probability and schedule weight in the loss, but there is no learned or
+sinusoidal time embedding and no time-conditioned normalization layer. The
+denoiser sees the corrupted token sequence and can infer its effective noise
+level from the mask pattern.
+
+The source model's rotary position embeddings remain unchanged. They encode
+each token's sequence position, not diffusion time.
+
+## 5. Reverse process
 
 Generation begins with:
 
@@ -99,7 +110,7 @@ At every denoising step:
 The deterministic reveal allocator divides the remaining masks across the
 remaining steps and guarantees that every mask is filled.
 
-## 5. Blockwise generation
+## 6. Blockwise generation
 
 Pure diffusion over a long output can be hard for a small model. The sampler
 therefore supports blocks. It fully denoises one block before moving right:
@@ -114,7 +125,7 @@ Within a block, attention remains bidirectional. Earlier completed blocks form
 fixed context. This interpolates between whole-span diffusion and an
 autoregressive ordering over blocks.
 
-## 6. What students should measure
+## 7. What students should measure
 
 - AR initialization versus random initialization.
 - Schedule-weighted versus uniform loss.
