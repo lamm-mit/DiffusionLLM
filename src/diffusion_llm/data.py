@@ -161,20 +161,50 @@ def _manual_chat(messages: list[dict[str, str]], generation_prompt: bool) -> str
     return rendered
 
 
+def _token_id_list(encoded: Any) -> list[int]:
+    """Normalize tokenizer outputs, including ``tokenizers.Encoding`` objects."""
+    if hasattr(encoded, "ids"):
+        encoded = encoded.ids
+    elif isinstance(encoded, dict):
+        encoded = encoded.get("input_ids")
+    elif hasattr(encoded, "input_ids"):
+        encoded = encoded.input_ids
+    if hasattr(encoded, "tolist"):
+        encoded = encoded.tolist()
+    if (
+        isinstance(encoded, (list, tuple))
+        and len(encoded) == 1
+        and isinstance(encoded[0], (list, tuple))
+    ):
+        encoded = encoded[0]
+    if not isinstance(encoded, (list, tuple)) or not all(
+        isinstance(token_id, int) for token_id in encoded
+    ):
+        raise TypeError(
+            "Tokenizer must return token IDs as a sequence, an Encoding, "
+            "or an object with input_ids."
+        )
+    return list(encoded)
+
+
 def _encode_chat(
     tokenizer: Any,
     messages: list[dict[str, str]],
     generation_prompt: bool,
 ) -> list[int]:
     if getattr(tokenizer, "chat_template", None):
-        return tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=generation_prompt,
+        return _token_id_list(
+            tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=generation_prompt,
+            )
         )
-    return tokenizer.encode(
-        _manual_chat(messages, generation_prompt),
-        add_special_tokens=True,
+    return _token_id_list(
+        tokenizer.encode(
+            _manual_chat(messages, generation_prompt),
+            add_special_tokens=True,
+        )
     )
 
 

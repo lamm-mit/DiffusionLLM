@@ -49,9 +49,13 @@ For development:
 
 ```bash
 uv sync --extra dev
-uv run pytest
+CUDA_VISIBLE_DEVICES="" uv run pytest
 uv run ruff check .
 ```
+
+The test suite uses tiny models and should normally run on CPU. Hiding CUDA
+prevents Transformers from automatically wrapping the end-to-end test in
+multi-GPU `DataParallel`.
 
 ### Compatible alternative: venv and pip
 
@@ -68,6 +72,17 @@ diffusion-llm doctor
 
 The package targets `transformers>=5.13,<6`. Its attention implementation is
 version-sensitive.
+
+On a minimal Ubuntu GPU host, install a compiler and the development headers
+matching the Python used by the environment. For the Python 3.12 setup above:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential python3.12-dev
+```
+
+If the host uses another Python version, install the matching
+`pythonX.Y-dev` package.
 
 ## Small end-to-end example
 
@@ -160,8 +175,8 @@ This baseline uses:
 - [`Qwen/Qwen2.5-1.5B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct);
 - the 207k-conversation `train_sft` split of
   [`HuggingFaceH4/ultrachat_200k`](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k);
-- three epochs at sequence length 1024;
-- effective batch size 64 across four GPUs; and
+- three epochs at sequence length 512;
+- effective batch size 64 on one RTX 6000 Ada; and
 - full-parameter training rather than LoRA.
 
 Convert the larger initialization:
@@ -173,23 +188,24 @@ uv run diffusion-llm convert \
   --dtype bfloat16
 ```
 
-Launch distributed training:
+On a machine where `nvidia-smi` lists an RTX 5000 Ada as physical GPU 0 and an
+RTX 6000 Ada as physical GPU 1, isolate training to the 6000:
 
 ```bash
-uv run accelerate launch \
-  --num_processes 4 \
-  --module diffusion_llm train \
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
+CUDA_VISIBLE_DEVICES=1 \
+uv run diffusion-llm train \
   --model artifacts/qwen2.5-1.5b-diffusion-base \
   --dataset HuggingFaceH4/ultrachat_200k \
   --train-split train_sft \
   --eval-split test_sft \
   --mode sft \
   --output artifacts/qwen2.5-1.5b-diffusion-ultrachat \
-  --max-length 1024 \
+  --max-length 512 \
   --epochs 3 \
   --batch-size 2 \
   --eval-batch-size 2 \
-  --gradient-accumulation-steps 8 \
+  --gradient-accumulation-steps 32 \
   --learning-rate 5e-5 \
   --warmup-ratio 0.03 \
   --weight-decay 0.1 \
@@ -203,29 +219,37 @@ uv run accelerate launch \
   --bf16
 ```
 
-With four processes, per-device batch 2 and gradient accumulation 8 give an
-effective batch of `4 × 2 × 8 = 64`. The complete run is roughly 9,700
-optimizer steps before filtering or truncation effects.
+Per-device batch 2 and gradient accumulation 32 give an effective batch of
+`2 × 32 = 64`. The complete run is roughly 9,700 optimizer steps before
+filtering or truncation effects. If memory is tight, use batch 1 and gradient
+accumulation 64.
 
-Plan on approximately four 80 GB training GPUs for this conservative recipe.
-Memory depends on the GPU, kernels, and example lengths. Reduce
-`--batch-size` first if necessary. On one 80 GB GPU, start with batch 1 and
-gradient accumulation 64.
+Inside this process, the physical RTX 6000 Ada is intentionally renumbered to
+`cuda:0`. Only one GPU is visible, so Transformers does not activate
+`DataParallel`.
 
-Generate a realistic long response and animation:
+In a second terminal, sample a completed numbered checkpoint on physical GPU 0,
+the RTX 5000 Ada:
 
 ```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
+CUDA_VISIBLE_DEVICES=0 \
 uv run diffusion-llm generate \
-  --model artifacts/qwen2.5-1.5b-diffusion-ultrachat \
+  --model artifacts/qwen2.5-1.5b-diffusion-ultrachat/checkpoint-500 \
   --prompt "Explain how masked diffusion generates text in parallel and compare it with autoregressive decoding." \
   --chat-template \
   --max-new-tokens 128 \
   --steps 48 \
   --block-size 128 \
   --temperature 0.2 \
+  --device cuda:0 \
   --gif artifacts/ultrachat-denoising.gif \
   --gif-frame-duration-ms 140
 ```
+
+Wait until a checkpoint directory has finished writing before loading it.
+Within the sampling process, the isolated physical RTX 5000 Ada is likewise
+renumbered to `cuda:0`.
 
 This is a serious baseline with a reasonable chance of producing a useful
 classroom model, but it is not a quality guarantee. Evaluate held-out MDLM
@@ -370,7 +394,7 @@ resolve even when there are fewer steps than output tokens.
 ## Verification
 
 ```bash
-uv run pytest
+CUDA_VISIBLE_DEVICES="" uv run pytest
 uv run ruff check .
 ```
 
@@ -385,6 +409,80 @@ The suite checks:
 - long denoising histories render as valid multi-frame GIFs;
 - diffusion loss is finite and differentiable; and
 - conversion, local data, training, save, reload, and generation work together.
+
+## Troubleshooting
+
+### Triton fails with `Python.h: No such file or directory`
+
+A traceback ending in a command similar to:
+
+```text
+gcc ... cuda_utils.c ... fatal error: Python.h: No such file or directory
+```
+
+means PyTorch/Triton tried to compile a CUDA helper, but the machine lacks the
+development headers for the selected Python. It is not a diffusion-model loss
+failure.
+
+For repository tests, use CPU:
+
+```bash
+CUDA_VISIBLE_DEVICES="" uv run pytest
+```
+
+For GPU training on Ubuntu, install the matching headers and confirm the
+include directory:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential python3.12-dev
+uv run python -c 'import sysconfig; print(sysconfig.get_path("include"))'
+```
+
+If `python3.12-dev` is unavailable, either enable a repository that provides
+it or use the host's supported Python and matching headers:
+
+```bash
+sudo apt-get install -y build-essential python3-dev
+uv sync --python "$(command -v python3)"
+```
+
+The project supports Python 3.10 and newer.
+
+### Multiple GPUs have unequal memory
+
+PyTorch may warn that one GPU has less than 75% of another GPU's memory or
+cores. Do not expose both the 32 GB RTX 5000 Ada and 48 GB RTX 6000 Ada to the
+same training process. Select the 6000 for training:
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 \
+uv run diffusion-llm train \
+  ...
+```
+
+Use `CUDA_VISIBLE_DEVICES=0` in a separate process for sampling. A selected
+physical device is presented to that process as `cuda:0`. The
+`warmup_ratio is deprecated` message in Transformers is a separate warning and
+is not the cause of the missing-header failure.
+
+### Arrow overflow mentions `tokenizers.Encoding`
+
+An error such as:
+
+```text
+OverflowError: Try to reduce writer_batch_size ...
+Could not convert Encoding(...) with type tokenizers.Encoding
+```
+
+comes from a fast tokenizer returning an `Encoding` object where older
+DiffusionLLM versions expected `list[int]`. Current versions normalize both
+forms. Update and resynchronize before restarting:
+
+```bash
+git pull
+uv sync
+```
 
 ## Project layout
 
