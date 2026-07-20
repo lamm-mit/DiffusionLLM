@@ -14,7 +14,7 @@ training it, and generating text by iterative denoising.
 
 ## What is included
 
-- AR-to-diffusion conversion for Qwen2/Qwen2.5, Qwen3, and Llama models.
+- AR-to-diffusion conversion for Qwen2/Qwen2.5, Qwen3, and Llama models (others can be added).
 - Padding-aware bidirectional attention with the original pretrained weights.
 - Continuous-time absorbing-mask MDLM training.
 - Raw-text continual pretraining and supervised fine-tuning.
@@ -25,6 +25,8 @@ training it, and generating text by iterative denoising.
 - Optional automatic model and checkpoint uploads to the Hugging Face Hub.
 - Local files, saved `datasets` directories, and Hugging Face Hub datasets.
 - Offline unit tests, attention tests, and an end-to-end training test.
+
+![alt text](assets/sample-generation.gif)
 
 ## Installation
 
