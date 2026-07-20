@@ -148,6 +148,7 @@ nor included in the loss.
 uv run diffusion-llm generate \
   --model artifacts/qwen2.5-0.5b-diffusion-smoke \
   --prompt "Explain masked diffusion in one concise paragraph." \
+  --system-prompt "Answer clearly and accurately." \
   --chat-template \
   --max-new-tokens 64 \
   --steps 24 \
@@ -156,6 +157,11 @@ uv run diffusion-llm generate \
   --gif artifacts/denoising.gif \
   --gif-frame-duration-ms 180
 ```
+
+`--system-prompt` is optional and requires `--chat-template`. When supplied,
+generation applies the tokenizer chat template to a `system` message followed
+by the user `--prompt`, matching SFT datasets that use separate system and user
+roles.
 
 The animation contains only two clean text panels: the prompt and the evolving
 result. Unresolved tokens appear as purple dots, newly committed text appears

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
 import torch
 
 from diffusion_llm import cli
@@ -22,11 +24,14 @@ class ToyTokenizer:
     eot_token_id = None
     chat_template = "present"
 
+    def __init__(self):
+        self.last_messages = None
+
     def encode(self, text, add_special_tokens=True):
         return [2, 3]
 
     def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
-        assert messages == [{"role": "user", "content": "Prompt:"}]
+        self.last_messages = messages
         assert tokenize
         assert add_generation_prompt
         return FakeEncoding([2, 3])
@@ -41,7 +46,6 @@ class ToyTokenizer:
 
 class ToySampler:
     def sample(self, prompts, *, max_new_tokens, return_history, **kwargs):
-        assert return_history
         prompt = prompts[0]
         initial = torch.tensor([prompt + [9] * max_new_tokens])
         middle = torch.tensor([prompt + [4] * (max_new_tokens // 2) + [9] * 2])
@@ -49,7 +53,7 @@ class ToySampler:
         return SamplerOutput(
             sequences=final,
             prompt_lengths=[len(prompt)],
-            histories=[initial, middle, final],
+            histories=[initial, middle, final] if return_history else None,
         )
 
 
@@ -86,6 +90,72 @@ def test_generate_cli_writes_gif(
     assert "generated" in output
     assert str(gif_path) in output
     assert gif_path.exists()
+
+
+def test_generate_cli_applies_optional_system_message(
+    monkeypatch,
+    capsys,
+) -> None:
+    tokenizer = ToyTokenizer()
+    monkeypatch.setattr(
+        cli,
+        "_sampler_from_args",
+        lambda args: (tokenizer, ToySampler()),
+    )
+
+    cli.main(
+        [
+            "generate",
+            "--model",
+            "unused",
+            "--prompt",
+            "Question",
+            "--system-prompt",
+            "Scientific system instruction",
+            "--chat-template",
+            "--max-new-tokens",
+            "4",
+            "--steps",
+            "2",
+            "--block-size",
+            "4",
+            "--no-progress",
+            "--json",
+        ]
+    )
+
+    assert tokenizer.last_messages == [
+        {"role": "system", "content": "Scientific system instruction"},
+        {"role": "user", "content": "Question"},
+    ]
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["system_prompt"] == "Scientific system instruction"
+
+
+def test_generate_system_message_requires_chat_template(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "_sampler_from_args",
+        lambda args: pytest.fail("model should not be loaded"),
+    )
+
+    with pytest.raises(SystemExit):
+        cli.main(
+            [
+                "generate",
+                "--model",
+                "unused",
+                "--prompt",
+                "Question",
+                "--system-prompt",
+                "Scientific system instruction",
+            ]
+        )
+
+    assert "--system-prompt requires --chat-template" in capsys.readouterr().err
 
 
 def test_train_cli_parses_hub_options() -> None:

@@ -162,7 +162,11 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument(
         "--chat-template",
         action="store_true",
-        help="Wrap the prompt as a user message with the tokenizer's chat template.",
+        help="Format the prompt as chat, optionally with --system-prompt.",
+    )
+    generate.add_argument(
+        "--system-prompt",
+        help="Optional system message; requires --chat-template.",
     )
     generate.add_argument(
         "--gif",
@@ -238,10 +242,19 @@ def _sample_kwargs(args: argparse.Namespace) -> dict[str, object]:
 
 
 def _run_generate(args: argparse.Namespace) -> None:
+    if args.system_prompt is not None and not args.chat_template:
+        raise ValueError("--system-prompt requires --chat-template.")
     tokenizer, sampler = _sampler_from_args(args)
+    messages = None
+    if args.system_prompt is not None:
+        messages = [
+            {"role": "system", "content": args.system_prompt},
+            {"role": "user", "content": args.prompt},
+        ]
     prompt_ids = encode_prompt(
         tokenizer,
         args.prompt,
+        messages=messages,
         chat_template=args.chat_template,
     )
     output = sampler.sample(
@@ -266,6 +279,7 @@ def _run_generate(args: argparse.Namespace) -> None:
             json.dumps(
                 {
                     "prompt": args.prompt,
+                    "system_prompt": args.system_prompt,
                     "text": text,
                     "prompt_tokens": len(prompt_ids),
                     "generated_tokens": args.max_new_tokens,
