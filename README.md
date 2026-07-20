@@ -33,6 +33,7 @@ Python 3.10+ is required. A CUDA GPU is strongly recommended for real models.
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
+source "$HOME/.local/bin/env"
 
 git clone https://github.com/lamm-mit/DiffusionLLM.git
 cd DiffusionLLM
