@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "classroom-diffusion-llm"
+version = "0.1.0"
+description = "A focused, teachable pipeline for converting small autoregressive LLMs to masked diffusion LLMs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "accelerate>=1.11,<2",
+    "datasets>=4.2,<5",
+    "peft>=0.17,<1",
+    "safetensors>=0.5",
+    "torch>=2.6",
+    "transformers>=5.13,<6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.11",
+]
+
+[project.scripts]
+diffusion-llm = "diffusion_llm.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/lamm-mit/DiffusionLLM"
+Repository = "https://github.com/lamm-mit/DiffusionLLM.git"
+Issues = "https://github.com/lamm-mit/DiffusionLLM/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

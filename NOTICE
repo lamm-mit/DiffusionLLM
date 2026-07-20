@@ -1,0 +1,12 @@
+Classroom DiffusionLLM
+Copyright 2026
+
+This product includes design ideas and adapted implementation patterns from:
+
+  dLLM: Simple Diffusion Language Modeling
+  https://github.com/ZHZisZZ/dllm
+  Reviewed revision: ca176752fbceec49c6b4777a2c18ae88e4eb10ed
+  Licensed under the Apache License, Version 2.0.
+
+The files in this project were reorganized, simplified, and substantially
+rewritten for a focused classroom AR-to-masked-diffusion workflow.
