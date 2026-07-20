@@ -61,14 +61,14 @@ special block masks used by BD3LM.
 
 The MDLM trainer:
 
-1. samples one time \(t\) per sequence;
-2. masks eligible tokens independently with probability \(1-\alpha(t)\);
+1. samples one time $t$ per sequence;
+2. masks eligible tokens independently with probability $1-\alpha(t)$;
 3. predicts clean token IDs at the same positions;
 4. applies either schedule or uniform weighting; and
 5. normalizes over token, sequence, or batch.
 
-The default linear schedule yields \(\alpha(t)=1-t\) and loss weight
-\(1/t\). SFT labels use `-100` to prevent prompt corruption and loss.
+The default linear schedule yields $\alpha(t)=1-t$ and loss weight
+$1/t$. SFT labels use `-100` to prevent prompt corruption and loss.
 
 ## MDLM inference
 

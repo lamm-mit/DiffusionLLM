@@ -4,16 +4,16 @@
 
 A decoder-only AR model normally uses the factorization
 
-\[
+$$
 p(x)=\prod_i p(x_i\mid x_{<i}),
-\]
+$$
 
 implemented by a lower-triangular causal attention mask. Masked diffusion needs
 each noised position to use information on both sides:
 
-\[
+$$
 p_\theta(x_{0,i}\mid x_t).
-\]
+$$
 
 The converter keeps the tokenizer, embeddings, transformer blocks, LM head,
 and pretrained weights. It changes the model configuration and replaces the
@@ -27,41 +27,41 @@ denoise a mask token.
 
 ## 2. Forward corruption
 
-Let \(x_0\) be a clean sequence and \(t\in[\epsilon,1]\) a sampled time. The
+Let $x_0$ be a clean sequence and $t\in[\epsilon,1]$ a sampled time. The
 linear schedule is
 
-\[
+$$
 \alpha(t)=1-t.
-\]
+$$
 
-At each trainable position \(i\), independently sample:
+At each trainable position $i$, independently sample:
 
-\[
+$$
 x_{t,i} =
 \begin{cases}
 x_{0,i} & \text{with probability } \alpha(t),\\
 \texttt{[MASK]} & \text{with probability } 1-\alpha(t)=t.
 \end{cases}
-\]
+$$
 
 SFT prompt tokens use label `-100`. They remain clean conditioning context and
 are never selected for corruption or loss. Padding is likewise excluded.
 
 The implementation forces at least one mask in every batch row that has a
-target. This avoids zero-loss examples when \(t\) is small or the response is
+target. This avoids zero-loss examples when $t$ is small or the response is
 short.
 
 ## 3. Training objective
 
 For a continuous-time masked diffusion model, the schedule weight is
 
-\[
+$$
 w(t)=\frac{-\alpha'(t)}{1-\alpha(t)}.
-\]
+$$
 
-With the linear schedule, \(w(t)=1/t\). The estimator used here is:
+With the linear schedule, $w(t)=1/t$. The estimator used here is:
 
-\[
+$$
 \mathcal{L}
 =
 \frac{1}{N}
@@ -70,14 +70,14 @@ w(t)\,\mathrm{CE}\left(
 p_\theta(\cdot\mid x_t)_i,
 x_{0,i}
 \right),
-\]
+$$
 
-where \(M_t\) contains corrupted target positions and \(N\) is the number of
+where $M_t$ contains corrupted target positions and $N$ is the number of
 non-padding target tokens. `--loss-weighting uniform` is available as a useful
 classroom ablation but is not the schedule-weighted MDLM objective.
 
-No right shift is applied: logits at position \(i\) predict the clean token at
-position \(i\). That is different from causal language modeling.
+No right shift is applied: logits at position $i$ predict the clean token at
+position $i$. That is different from causal language modeling.
 
 ## 4. Reverse process
 

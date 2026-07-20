@@ -19,7 +19,7 @@ PYTHONPATH=src pytest
 ```
 
 Discuss the two attention tests before continuing. The most important assertion
-is that modifying token \(j>i\) changes the logits at \(i\).
+is that modifying token $j>i$ changes the logits at $i$.
 
 ## Part 2: create the initialization
 
@@ -116,7 +116,7 @@ complete apples-to-apples quality metric.
 
 1. Why can the AR initialization still help after removing the causal mask?
 2. Why are target logits not shifted right?
-3. What happens as \(t\to 0\), and why is `time_epsilon` needed?
+3. What happens as $t\to 0$, and why is `time_epsilon` needed?
 4. Why might a small block outperform whole-span diffusion after short training?
 5. Why is conversion support architecture-specific even though the loss is not?
 6. Which computations could be cached or sparsified in a production sampler?
