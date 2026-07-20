@@ -257,17 +257,24 @@ Wait until a checkpoint directory has finished writing before loading it.
 Within the sampling process, the isolated physical RTX 5000 Ada is likewise
 renumbered to `cuda:0`.
 
-Before using `--push-to-hub`, authenticate once with a write-capable token:
+This is a serious baseline with a reasonable chance of producing a useful
+classroom model, but it is not a quality guarantee. Evaluate held-out MDLM
+loss, response quality, repetition, instruction following, and speed against
+the original AR checkpoint.
+
+## Push models to the Hugging Face Hub
+
+Authenticate once with a write-capable Hugging Face token:
 
 ```bash
 uv run hf auth login
 ```
 
-To enable uploads in the substantial recipe, replace its final `--bf16` line
-with:
+### Push automatically during training
+
+Add these arguments to any `diffusion-llm train` command:
 
 ```bash
-  --bf16 \
   --push-to-hub \
   --hub-model-id YOUR_HF_USERNAME/qwen2.5-1.5b-diffusion-ultrachat \
   --hub-strategy every_save
@@ -279,6 +286,46 @@ with:
 the latest resumable state under `last-checkpoint`, or `all_checkpoints` to
 retain every numbered checkpoint. Add `--hub-private` when creating a private
 repository. Privacy cannot be changed by the flag after a repository exists.
+
+For example, the end of the substantial training command can be:
+
+```bash
+  --gradient-checkpointing \
+  --bf16 \
+  --push-to-hub \
+  --hub-model-id YOUR_HF_USERNAME/qwen2.5-1.5b-diffusion-ultrachat \
+  --hub-strategy every_save
+```
+
+### Push an existing checkpoint manually
+
+Upload a completed numbered checkpoint to the root of a model repository:
+
+```bash
+uv run hf upload \
+  YOUR_HF_USERNAME/qwen2.5-1.5b-diffusion-ultrachat \
+  artifacts/qwen2.5-1.5b-diffusion-ultrachat/checkpoint-500 \
+  . \
+  --commit-message "Upload diffusion checkpoint 500"
+```
+
+Add `--private` to that command if the repository does not exist yet and
+should be private. Do not upload a checkpoint directory while the trainer is
+still writing it.
+
+After training finishes, the output directory root contains the final model.
+Upload it while excluding the large local Trainer checkpoint directories:
+
+```bash
+uv run hf upload \
+  YOUR_HF_USERNAME/qwen2.5-1.5b-diffusion-ultrachat \
+  artifacts/qwen2.5-1.5b-diffusion-ultrachat \
+  . \
+  --exclude "checkpoint-*" \
+  --commit-message "Upload final diffusion model"
+```
+
+### Download from the Hub for inference
 
 The Hub hosts checkpoint files, not this inference implementation. On another
 machine, install DiffusionLLM and generate directly from the model ID:
@@ -301,11 +348,6 @@ uv run diffusion-llm generate \
 
 For a private model, run `uv run hf auth login` on the inference machine as
 well, or provide a read token through the `HF_TOKEN` environment variable.
-
-This is a serious baseline with a reasonable chance of producing a useful
-classroom model, but it is not a quality guarantee. Evaluate held-out MDLM
-loss, response quality, repetition, instruction following, and speed against
-the original AR checkpoint.
 
 ## Other modes
 
