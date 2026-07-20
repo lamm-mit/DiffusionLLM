@@ -111,3 +111,18 @@ def test_train_cli_parses_hub_options() -> None:
     assert args.hub_model_id == "lamm-mit/classroom-diffusion"
     assert args.hub_private
     assert args.hub_strategy == "checkpoint"
+
+
+def test_inference_progress_is_on_by_default_and_can_be_disabled() -> None:
+    parser = cli.build_parser()
+    defaults = parser.parse_args(
+        ["generate", "--model", "model", "--prompt", "Prompt:"]
+    )
+    disabled = parser.parse_args(
+        ["generate", "--model", "model", "--prompt", "Prompt:", "--no-progress"]
+    )
+
+    assert defaults.progress
+    assert not disabled.progress
+    assert cli._sample_kwargs(defaults)["show_progress"]
+    assert not cli._sample_kwargs(disabled)["show_progress"]

@@ -27,6 +27,7 @@ dependencies = [
     "pillow>=10,<13",
     "safetensors>=0.5",
     "torch>=2.6",
+    "tqdm>=4.67,<5",
     "transformers>=5.13,<6",
 ]
 

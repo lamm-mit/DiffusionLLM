@@ -160,6 +160,11 @@ result. Unresolved tokens appear as purple dots, newly committed text appears
 in gold, and older committed text becomes white. A small progress bar and step
 counter show the trajectory. The initial and final frames pause automatically.
 
+Generation and interactive chat show a terminal `tqdm` bar over the actual
+denoising forward passes by default. Pass `--no-progress` for quiet scripts or
+logs. The bar is written to stderr, so `generate --json` keeps stdout
+machine-readable.
+
 For the clearest parallel-denoising demonstration, make `--block-size` equal to
 `--max-new-tokens`. GIF history is collected only when `--gif` is supplied.
 The renderer is tested with a long prompt and a 128-token result; the canvas

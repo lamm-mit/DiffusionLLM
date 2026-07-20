@@ -48,6 +48,12 @@ def _add_inference_arguments(parser: argparse.ArgumentParser) -> None:
         default="auto",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show denoising progress (disable with --no-progress).",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -227,6 +233,7 @@ def _sample_kwargs(args: argparse.Namespace) -> dict[str, object]:
         "block_size": args.block_size,
         "temperature": args.temperature,
         "remasking": args.remasking,
+        "show_progress": args.progress,
     }
 
 

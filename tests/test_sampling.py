@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import torch
 
+from diffusion_llm import sampling
 from diffusion_llm.sampling import MaskedDiffusionSampler
 
 
@@ -45,3 +46,34 @@ def test_sampler_preserves_prompt_and_resolves_masks() -> None:
     assert len(output.histories) == 4
     assert output.histories[0][0, 2:].eq(ToyTokenizer.mask_token_id).all()
     assert not output.histories[-1].eq(ToyTokenizer.mask_token_id).any()
+
+
+def test_progress_tracks_actual_forward_passes(monkeypatch) -> None:
+    state = {"total": None, "updates": 0, "closed": False}
+
+    class RecordingProgress:
+        def __init__(self, *, total, **kwargs):
+            state["total"] = total
+            assert kwargs["desc"] == "Denoising"
+            assert kwargs["unit"] == "step"
+            assert not kwargs["disable"]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            state["closed"] = True
+
+        def update(self):
+            state["updates"] += 1
+
+    monkeypatch.setattr(sampling, "tqdm", RecordingProgress)
+    MaskedDiffusionSampler(ToyModel(), ToyTokenizer()).sample(
+        [[2, 3]],
+        max_new_tokens=5,
+        steps=4,
+        block_size=2,
+        show_progress=True,
+    )
+
+    assert state == {"total": 5, "updates": 5, "closed": True}

@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
+from tqdm.auto import tqdm
 
 from diffusion_llm.schedule import reveal_counts
 from diffusion_llm.tokenization import token_id_list
@@ -78,6 +79,7 @@ class MaskedDiffusionSampler:
         temperature: float = 0.0,
         remasking: str = "low_confidence",
         return_history: bool = False,
+        show_progress: bool = False,
     ) -> SamplerOutput:
         """Denoise a fixed mask canvas while preserving every prompt token."""
         if not prompts:
@@ -120,50 +122,65 @@ class MaskedDiffusionSampler:
         histories = [tokens.clone()] if return_history else None
         number_of_blocks = math.ceil(max_new_tokens / block_size)
         steps_per_block = max(1, math.ceil(steps / number_of_blocks))
+        block_lengths = [
+            min(block_size, max_new_tokens - block_index * block_size)
+            for block_index in range(number_of_blocks)
+        ]
+        total_denoising_steps = sum(
+            min(steps_per_block, block_length) for block_length in block_lengths
+        )
         suppressed = {mask_id, pad_id}
 
-        for block_index in range(number_of_blocks):
-            eligible = torch.zeros_like(tokens, dtype=torch.bool)
-            for row, prompt_length in enumerate(prompt_lengths):
-                start = prompt_length + block_index * block_size
-                stop = min(start + block_size, prompt_length + max_new_tokens)
-                eligible[row, start:stop] = True
+        with tqdm(
+            total=total_denoising_steps,
+            desc="Denoising",
+            unit="step",
+            disable=not show_progress,
+            dynamic_ncols=True,
+        ) as progress:
+            for block_index in range(number_of_blocks):
+                eligible = torch.zeros_like(tokens, dtype=torch.bool)
+                for row, prompt_length in enumerate(prompt_lengths):
+                    start = prompt_length + block_index * block_size
+                    stop = min(start + block_size, prompt_length + max_new_tokens)
+                    eligible[row, start:stop] = True
 
-            plan = reveal_counts((eligible & tokens.eq(mask_id)).sum(dim=1), steps_per_block)
-            for step_index in range(plan.shape[1]):
-                current_masks = eligible & tokens.eq(mask_id)
-                if not current_masks.any():
-                    break
-                logits = self.model(
-                    input_ids=tokens,
-                    attention_mask=attention_mask,
-                    use_cache=False,
-                ).logits
-                for token_id in suppressed:
-                    logits[..., token_id] = -torch.inf
-                predictions = _sample_predictions(logits, temperature)
+                plan = reveal_counts((eligible & tokens.eq(mask_id)).sum(dim=1), steps_per_block)
+                for step_index in range(plan.shape[1]):
+                    current_masks = eligible & tokens.eq(mask_id)
+                    if not current_masks.any():
+                        break
+                    logits = self.model(
+                        input_ids=tokens,
+                        attention_mask=attention_mask,
+                        use_cache=False,
+                    ).logits
+                    for token_id in suppressed:
+                        logits[..., token_id] = -torch.inf
+                    predictions = _sample_predictions(logits, temperature)
 
-                if remasking == "low_confidence":
-                    probabilities = F.softmax(logits.float(), dim=-1)
-                    confidence = probabilities.gather(
-                        -1,
-                        predictions.unsqueeze(-1),
-                    ).squeeze(-1)
-                else:
-                    confidence = torch.rand(tokens.shape, device=self.device)
-                confidence = confidence.masked_fill(~current_masks, -torch.inf)
+                    if remasking == "low_confidence":
+                        probabilities = F.softmax(logits.float(), dim=-1)
+                        confidence = probabilities.gather(
+                            -1,
+                            predictions.unsqueeze(-1),
+                        ).squeeze(-1)
+                    else:
+                        confidence = torch.rand(tokens.shape, device=self.device)
+                    confidence = confidence.masked_fill(~current_masks, -torch.inf)
 
-                for row in range(batch_size):
-                    count = min(
-                        int(plan[row, step_index].item()),
-                        int(current_masks[row].sum().item()),
-                    )
-                    if count == 0:
-                        continue
-                    selected = confidence[row].topk(count).indices
-                    tokens[row, selected] = predictions[row, selected]
-                if histories is not None:
-                    histories.append(tokens.clone())
+                    for row in range(batch_size):
+                        count = min(
+                            int(plan[row, step_index].item()),
+                            int(current_masks[row].sum().item()),
+                        )
+                        if count == 0:
+                            continue
+                        selected = confidence[row].topk(count).indices
+                        tokens[row, selected] = predictions[row, selected]
+                    if histories is not None:
+                        histories.append(tokens.clone())
+                    progress.update()
 
         if tokens.eq(mask_id).any():
             raise RuntimeError("Sampler ended with unresolved mask tokens.")
