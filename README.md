@@ -48,6 +48,11 @@ uv run diffusion-llm doctor
 `uv sync` creates `.venv` and installs the project. Commands below use
 `uv run`, so manual activation is unnecessary.
 
+For a complete production-style walkthrough—including a reproducible
+2,000,000-example chat mixture, 1,024-token continuation training, checkpoint
+resume and Hub upload, dual-GPU testing, system prompts, and denoising GIFs—see
+the **[end-to-end training recipes](TRAINING.md)**.
+
 For development:
 
 ```bash
@@ -179,6 +184,12 @@ The renderer is tested with a long prompt and a 128-token result; the canvas
 grows with wrapped output up to 24 result lines.
 
 ## Substantial training recipe
+
+The command below is the original UltraChat baseline. For the larger next-stage
+run, use **[the complete 2M-example, 1,024-token recipe](TRAINING.md)**. It
+starts from the published UltraChat diffusion model, broadens the instruction
+mixture, uses one deliberate epoch at a lower learning rate, uploads numbered
+checkpoints to the Hub, and tests generation on a second GPU.
 
 For materially better results, use a stronger instruction-tuned
 initialization, high-quality conversational data, full-model training, and
