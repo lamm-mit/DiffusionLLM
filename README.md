@@ -566,6 +566,7 @@ The suite checks:
 - prompts remain immutable;
 - long denoising histories render as valid multi-frame GIFs;
 - diffusion loss is finite and differentiable; and
+- custom diffusion loss is normalized correctly during gradient accumulation;
 - conversion, local data, training, save, reload, and generation work together.
 
 ## Project layout

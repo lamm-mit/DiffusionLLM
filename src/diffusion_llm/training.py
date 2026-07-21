@@ -81,6 +81,12 @@ class MDLMTrainer(Trainer):
         **kwargs: Any,
     ):
         super().__init__(*args, **kwargs)
+        # This custom loss is already reduced over each microbatch and does not
+        # consume ``num_items_in_batch``. Transformers 5 otherwise infers from
+        # the converted model's **kwargs forward signature that the model will
+        # normalize accumulated losses itself and skips Trainer's division by
+        # gradient_accumulation_steps.
+        self.model_accepts_loss_kwargs = False
         if not 0 < time_epsilon < 1:
             raise ValueError("time_epsilon must lie in (0, 1).")
         if loss_weighting not in {"schedule", "uniform"}:

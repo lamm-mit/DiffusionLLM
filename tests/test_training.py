@@ -23,6 +23,23 @@ from diffusion_llm.training import (
 )
 
 
+class _ScalarLossModel(torch.nn.Module):
+    """Tiny model whose deterministic loss makes accumulation scaling observable."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, **kwargs):
+        return None
+
+
+class _DeterministicMDLMTrainer(MDLMTrainer):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        loss = model.weight * inputs["scale"].float().mean()
+        return (loss, None) if return_outputs else loss
+
+
 def test_one_diffusion_loss_backward(
     tiny_ar_checkpoint: Path,
     tmp_path: Path,
@@ -53,6 +70,32 @@ def test_one_diffusion_loss_backward(
     assert loss.item() > 0
     loss.backward()
     assert any(parameter.grad is not None for parameter in model.parameters())
+
+
+def test_gradient_accumulation_normalizes_custom_loss(tmp_path: Path) -> None:
+    model = _ScalarLossModel()
+    trainer = _DeterministicMDLMTrainer(
+        model=model,
+        args=TrainingArguments(
+            output_dir=str(tmp_path / "trainer-accumulation"),
+            gradient_accumulation_steps=4,
+            report_to=[],
+            use_cpu=True,
+        ),
+        mask_token_id=9,
+    )
+    trainer.current_gradient_accumulation_steps = 4
+
+    returned_loss = trainer.training_step(
+        model,
+        {"scale": torch.tensor([2.0])},
+        num_items_in_batch=torch.tensor(1),
+    )
+
+    assert trainer.model_accepts_loss_kwargs is False
+    assert returned_loss.item() == pytest.approx(0.5)
+    assert model.weight.grad is not None
+    assert model.weight.grad.item() == pytest.approx(0.5)
 
 
 def test_lora_wraps_diffusion_model(
