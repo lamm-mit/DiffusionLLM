@@ -23,6 +23,7 @@ training it, and generating text by iterative denoising.
 - Chat-template-aware SFT and inference.
 - Animated GIF export of the complete denoising trajectory.
 - Optional automatic model and checkpoint uploads to the Hugging Face Hub.
+- Manifest-driven, exact-size chat-mixture construction with recoverable uploads.
 - Local files, saved `datasets` directories, and Hugging Face Hub datasets.
 - Offline unit tests, attention tests, and an end-to-end training test.
 
@@ -91,6 +92,49 @@ sudo apt-get install -y build-essential python3.12-dev
 
 If the host uses another Python version, install the matching
 `pythonX.Y-dev` package.
+
+## Build a configurable training mixture
+
+Dataset sources live in an editable JSON manifest. The included
+[`examples/chatmix_2m.json`](examples/chatmix_2m.json) uses UltraChat and four
+Apache-2.0 SmolTalk subsets as its fixed core, then samples Dolci-No-Tools to
+reach the requested total exactly:
+
+```bash
+uv run hf auth login
+
+uv run diffusion-llm build-mixture \
+  --manifest examples/chatmix_2m.json \
+  --target-train-rows 2000000 \
+  --save-to-disk artifacts/diffusion-chat-mixture-1024-chatmix-2m \
+  --push-to-hub \
+  --hub-dataset-id lamm-mit/diffusion-chat-mixture-1024 \
+  --hub-config-name chatmix_2m \
+  --num-proc 16 \
+  --upload-num-proc 1
+```
+
+Filtering and normalization may use many workers, but Hub upload defaults to
+one process. This avoids Python multiprocessing failures when a parent process
+has no importable script path. The CLI saves the complete local `DatasetDict`
+before uploading, so a network failure does not require rebuilding it.
+
+Retry only the upload with:
+
+```bash
+uv run diffusion-llm upload-mixture \
+  --dataset artifacts/diffusion-chat-mixture-1024-chatmix-2m \
+  --hub-dataset-id lamm-mit/diffusion-chat-mixture-1024 \
+  --hub-config-name chatmix_2m \
+  --num-proc 1
+```
+
+Edit the manifest to add or remove sources, change splits and licenses, cap a
+source with `max_train_rows`, or choose one source with `fill: true` to supply
+the exact remainder. `validation_split: null` reserves disjoint validation
+rows from that source's training split. See the
+**[end-to-end training recipes](TRAINING.md#2-build-and-publish-the-2m-example-mixture)**
+for the manifest schema, retry instructions, and the subsequent training run.
 
 ## Small end-to-end example
 
@@ -482,6 +526,8 @@ See [docs/method.md](docs/method.md) for the longer derivation and
 
 ```text
 diffusion-llm convert   AR checkpoint -> bidirectional checkpoint
+diffusion-llm build-mixture  source manifest -> exact-size chat DatasetDict
+diffusion-llm upload-mixture saved DatasetDict -> Hugging Face Hub
 diffusion-llm train     continual pretraining or SFT
 diffusion-llm generate  one-shot denoising, optionally with GIF export
 diffusion-llm chat      interactive multi-turn inference
@@ -531,6 +577,7 @@ DiffusionLLM/
 │   ├── conversion.py    # AR checkpoint conversion
 │   ├── modeling.py      # bidirectional Llama/Qwen model classes
 │   ├── data.py          # local and Hub datasets
+│   ├── mixture.py       # configurable exact-size dataset mixtures
 │   ├── training.py      # continuous-time MDLM objective
 │   ├── sampling.py      # iterative unmasking
 │   ├── schedule.py      # corruption and reveal schedules

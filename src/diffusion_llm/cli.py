@@ -21,6 +21,11 @@ import transformers
 from diffusion_llm import __version__
 from diffusion_llm.conversion import convert_checkpoint
 from diffusion_llm.loading import choose_device, load_model, load_tokenizer
+from diffusion_llm.mixture import (
+    MixtureBuildConfig,
+    build_and_write_mixture,
+    upload_saved_mixture,
+)
 from diffusion_llm.sampling import MaskedDiffusionSampler, decode_generations, encode_prompt
 from diffusion_llm.training import TrainConfig, train
 
@@ -62,7 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="diffusion-llm",
         description=(
             "Convert a supported decoder-only LLM to bidirectional attention, "
-            "train it with masked diffusion, and run iterative denoising inference."
+            "build chat mixtures, train with masked diffusion, and run iterative "
+            "denoising inference."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -156,6 +162,88 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train_parser.set_defaults(handler=_run_train)
 
+    mixture = commands.add_parser(
+        "build-mixture",
+        help="Build an exact-size chat dataset from a JSON source manifest.",
+    )
+    mixture.add_argument(
+        "--manifest",
+        required=True,
+        help="JSON file describing datasets, configurations, splits, caps, and licenses.",
+    )
+    mixture.add_argument("--target-train-rows", type=int, required=True)
+    mixture.add_argument(
+        "--save-to-disk",
+        metavar="DIRECTORY",
+        help="Write a recoverable datasets directory before any Hub upload.",
+    )
+    mixture.add_argument(
+        "--push-to-hub",
+        action="store_true",
+        help="Upload the completed DatasetDict to the Hugging Face Hub.",
+    )
+    mixture.add_argument(
+        "--hub-dataset-id",
+        help="Destination dataset repository, for example username/dataset-name.",
+    )
+    mixture.add_argument("--hub-config-name", default="default")
+    mixture.add_argument("--hub-private", action="store_true")
+    mixture.add_argument("--max-shard-size", default="500MB")
+    mixture.add_argument(
+        "--num-proc",
+        type=int,
+        default=1,
+        help="Workers used to validate and normalize source rows.",
+    )
+    mixture.add_argument(
+        "--upload-num-proc",
+        type=int,
+        default=1,
+        help="Save/upload workers; one is the safest default on Python 3.13.",
+    )
+    mixture.add_argument("--seed", type=int, default=42)
+    mixture.add_argument("--cache-dir")
+    mixture.add_argument(
+        "--validation-rows-per-source",
+        type=int,
+        help="Override every source's validation_rows manifest value.",
+    )
+    mixture.add_argument(
+        "--max-validation-rows",
+        type=int,
+        help="Cap the final combined validation split after shuffling.",
+    )
+    mixture.add_argument(
+        "--allowed-role",
+        action="append",
+        dest="allowed_roles",
+        help="Allowed message role; repeat to replace system,user,assistant defaults.",
+    )
+    mixture.add_argument(
+        "--require-final-assistant",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Require every retained conversation to end in an assistant message.",
+    )
+    mixture.set_defaults(handler=_run_build_mixture)
+
+    upload_mixture = commands.add_parser(
+        "upload-mixture",
+        help="Retry Hub upload from a locally saved chat mixture.",
+    )
+    upload_mixture.add_argument("--dataset", required=True, help="Saved DatasetDict directory.")
+    upload_mixture.add_argument("--hub-dataset-id", required=True)
+    upload_mixture.add_argument("--hub-config-name", default="default")
+    upload_mixture.add_argument("--hub-private", action="store_true")
+    upload_mixture.add_argument("--max-shard-size", default="500MB")
+    upload_mixture.add_argument(
+        "--num-proc",
+        type=int,
+        default=1,
+        help="Upload workers; one avoids stdin/spawn multiprocessing failures.",
+    )
+    upload_mixture.set_defaults(handler=_run_upload_mixture)
+
     generate = commands.add_parser("generate", help="Run one-shot diffusion generation.")
     _add_inference_arguments(generate)
     generate.add_argument("--prompt", required=True)
@@ -217,6 +305,50 @@ def _run_train(args: argparse.Namespace) -> None:
     values.pop("handler")
     output = train(TrainConfig(**values))
     print(f"Final training checkpoint: {output}")
+
+
+def _run_build_mixture(args: argparse.Namespace) -> None:
+    allowed_roles = tuple(args.allowed_roles or ("system", "user", "assistant"))
+    config = MixtureBuildConfig(
+        manifest=args.manifest,
+        target_train_rows=args.target_train_rows,
+        save_to_disk=args.save_to_disk,
+        push_to_hub=args.push_to_hub,
+        hub_dataset_id=args.hub_dataset_id,
+        hub_config_name=args.hub_config_name,
+        hub_private=args.hub_private,
+        max_shard_size=args.max_shard_size,
+        num_proc=args.num_proc,
+        upload_num_proc=args.upload_num_proc,
+        seed=args.seed,
+        cache_dir=args.cache_dir,
+        validation_rows_per_source=args.validation_rows_per_source,
+        max_validation_rows=args.max_validation_rows,
+        allowed_roles=allowed_roles,
+        require_final_assistant=args.require_final_assistant,
+    )
+    mixture = build_and_write_mixture(config)
+    destinations = []
+    if config.save_to_disk:
+        destinations.append(str(Path(config.save_to_disk).expanduser().resolve()))
+    if config.push_to_hub:
+        destinations.append(f"{config.hub_dataset_id}:{config.hub_config_name}")
+    print(f"Mixture complete ({len(mixture['train']):,} rows): {', '.join(destinations)}")
+
+
+def _run_upload_mixture(args: argparse.Namespace) -> None:
+    mixture = upload_saved_mixture(
+        args.dataset,
+        hub_dataset_id=args.hub_dataset_id,
+        hub_config_name=args.hub_config_name,
+        hub_private=args.hub_private,
+        max_shard_size=args.max_shard_size,
+        num_proc=args.num_proc,
+    )
+    print(
+        f"Mixture upload complete ({len(mixture['train']):,} rows): "
+        f"{args.hub_dataset_id}:{args.hub_config_name}"
+    )
 
 
 def _sampler_from_args(args: argparse.Namespace):
@@ -382,7 +514,14 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     try:
         args.handler(args)
-    except (FileExistsError, KeyError, RuntimeError, ValueError) as exc:
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        KeyError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 

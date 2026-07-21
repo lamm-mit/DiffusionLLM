@@ -76,9 +76,10 @@ The mixture combines the full training splits of:
 | Dolci-Instruct-SFT-No-Tools | sampled to reach 2M | ODC-BY-1.0 |
 
 The exact count is computed after structural filtering, so the output contains
-exactly 2,000,000 training rows even if a source is revised. The validation
-split contains up to 600 examples from each core test split and 2,000 disjoint
-Dolci examples. All rows use only `messages`, `source`, and `license` columns.
+exactly 2,000,000 training rows even if a source is revised. The included
+manifest requests 3,000 examples across the core test splits and 2,000
+disjoint Dolci examples. All rows use only `messages`, `source`, and `license`
+columns.
 
 Large dataset operations need substantial cache space. On a server, point the
 Hugging Face cache at a large local or scratch filesystem before running:
@@ -88,7 +89,56 @@ export HF_HOME=/path/with/at-least-30GB-free/huggingface
 ```
 
 Create the `chatmix_2m` configuration in
-`lamm-mit/diffusion-chat-mixture-1024`:
+`lamm-mit/diffusion-chat-mixture-1024` with the packaged builder:
+
+```bash
+uv run diffusion-llm build-mixture \
+  --manifest examples/chatmix_2m.json \
+  --target-train-rows 2000000 \
+  --save-to-disk artifacts/diffusion-chat-mixture-1024-chatmix-2m \
+  --push-to-hub \
+  --hub-dataset-id lamm-mit/diffusion-chat-mixture-1024 \
+  --hub-config-name chatmix_2m \
+  --num-proc 16 \
+  --upload-num-proc 1
+```
+
+`--num-proc` controls parallel filtering and normalization.
+`--upload-num-proc` separately controls local serialization and Hub upload and
+defaults to one, avoiding `<stdin>`/multiprocessing failures. The local copy is
+written before upload, so an interrupted upload can be retried without
+reconstructing the 2M rows.
+
+Retry only the upload with:
+
+```bash
+uv run diffusion-llm upload-mixture \
+  --dataset artifacts/diffusion-chat-mixture-1024-chatmix-2m \
+  --hub-dataset-id lamm-mit/diffusion-chat-mixture-1024 \
+  --hub-config-name chatmix_2m \
+  --num-proc 1
+```
+
+The JSON manifest accepts these fields for each entry in `sources`:
+
+- `dataset` (required), `config`, `train_split`, and `validation_split`;
+- `license` and optional `label`, written into every output row;
+- `max_train_rows`, which caps a source before mixing;
+- `validation_rows`, sampled from `validation_split`, or reserved disjointly
+  from training when `validation_split` is `null`;
+- `fill: true` on at most one source, which supplies the rows needed to hit
+  `--target-train-rows` exactly;
+- `preserve_original_source`, which appends upstream provenance to `source`;
+  and
+- `revision`, which pins a source to a Hub revision.
+
+If no source has `fill: true`, the combined fixed sources are deterministically
+downsampled to the requested total. The command rejects an undersized mixture
+instead of silently returning fewer rows. Use `--validation-rows-per-source`
+or `--max-validation-rows` for command-line validation overrides.
+
+<details>
+<summary>Expanded inline implementation (the CLI above is recommended)</summary>
 
 ```bash
 uv run python - <<'PY'
@@ -312,6 +362,8 @@ mixture.push_to_hub(
 )
 PY
 ```
+
+</details>
 
 Do not label the resulting dataset repository as Apache-2.0 only. It is a
 mixed-license collection and includes ODC-BY-1.0 data; retain the per-row

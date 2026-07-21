@@ -1,0 +1,43 @@
+{
+  "sources": [
+    {
+      "dataset": "HuggingFaceH4/ultrachat_200k",
+      "train_split": "train_sft",
+      "validation_split": "test_sft",
+      "license": "MIT",
+      "validation_rows": 1000
+    },
+    {
+      "dataset": "HuggingFaceTB/smoltalk",
+      "config": "smol-magpie-ultra",
+      "license": "Apache-2.0",
+      "validation_rows": 1000
+    },
+    {
+      "dataset": "HuggingFaceTB/smoltalk",
+      "config": "smol-constraints",
+      "license": "Apache-2.0",
+      "validation_rows": 250
+    },
+    {
+      "dataset": "HuggingFaceTB/smoltalk",
+      "config": "smol-rewrite",
+      "license": "Apache-2.0",
+      "validation_rows": 250
+    },
+    {
+      "dataset": "HuggingFaceTB/smoltalk",
+      "config": "smol-summarize",
+      "license": "Apache-2.0",
+      "validation_rows": 500
+    },
+    {
+      "dataset": "allenai/Dolci-Instruct-SFT-No-Tools",
+      "validation_split": null,
+      "license": "ODC-BY-1.0",
+      "validation_rows": 2000,
+      "fill": true,
+      "preserve_original_source": true
+    }
+  ]
+}

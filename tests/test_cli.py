@@ -183,6 +183,43 @@ def test_train_cli_parses_hub_options() -> None:
     assert args.hub_strategy == "checkpoint"
 
 
+def test_build_mixture_cli_uses_safe_upload_default() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "build-mixture",
+            "--manifest",
+            "mixture.json",
+            "--target-train-rows",
+            "2000000",
+            "--save-to-disk",
+            "artifacts/chatmix-2m",
+            "--push-to-hub",
+            "--hub-dataset-id",
+            "lamm-mit/diffusion-chat-mixture-1024",
+            "--hub-config-name",
+            "chatmix_2m",
+            "--num-proc",
+            "16",
+        ]
+    )
+
+    assert args.target_train_rows == 2_000_000
+    assert args.num_proc == 16
+    assert args.upload_num_proc == 1
+    assert args.require_final_assistant
+
+    retry = cli.build_parser().parse_args(
+        [
+            "upload-mixture",
+            "--dataset",
+            "artifacts/chatmix-2m",
+            "--hub-dataset-id",
+            "lamm-mit/diffusion-chat-mixture-1024",
+        ]
+    )
+    assert retry.num_proc == 1
+
+
 def test_inference_progress_is_on_by_default_and_can_be_disabled() -> None:
     parser = cli.build_parser()
     defaults = parser.parse_args(
