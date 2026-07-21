@@ -188,8 +188,9 @@ grows with wrapped output up to 24 result lines.
 The command below is the original UltraChat baseline. For the larger next-stage
 run, use **[the complete 2M-example, 1,024-token recipe](TRAINING.md)**. It
 starts from the published UltraChat diffusion model, broadens the instruction
-mixture, uses one deliberate epoch at a lower learning rate, uploads numbered
-checkpoints to the Hub, and tests generation on a second GPU.
+mixture, uses one deliberate epoch at a lower learning rate, uploads each
+checkpoint update to the Hub repository root, and tests generation on a second
+GPU.
 
 For materially better results, use a stronger instruction-tuned
 initialization, high-quality conversational data, full-model training, and
