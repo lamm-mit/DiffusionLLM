@@ -136,6 +136,7 @@ def test_hub_training_arguments_are_forwarded(tmp_path: Path) -> None:
     assert arguments.hub_model_id == "lamm-mit/classroom-diffusion"
     assert arguments.hub_private_repo
     assert arguments.hub_strategy.value == "checkpoint"
+    assert arguments.warmup_steps == pytest.approx(0.03)
 
 
 def test_push_to_hub_requires_model_id(tmp_path: Path) -> None:

@@ -174,6 +174,8 @@ def test_train_cli_parses_hub_options() -> None:
             "--hub-private",
             "--hub-strategy",
             "checkpoint",
+            "--warmup-steps",
+            "0.05",
         ]
     )
 
@@ -181,6 +183,7 @@ def test_train_cli_parses_hub_options() -> None:
     assert args.hub_model_id == "lamm-mit/classroom-diffusion"
     assert args.hub_private
     assert args.hub_strategy == "checkpoint"
+    assert args.warmup_steps == pytest.approx(0.05)
 
 
 def test_build_mixture_cli_uses_safe_upload_default() -> None:

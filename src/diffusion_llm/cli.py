@@ -118,7 +118,12 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--batch-size", type=int, default=4)
     train_parser.add_argument("--eval-batch-size", type=int, default=4)
     train_parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
-    train_parser.add_argument("--warmup-ratio", type=float, default=0.03)
+    train_parser.add_argument(
+        "--warmup-steps",
+        type=float,
+        default=0.03,
+        help="Absolute steps when >=1, or a fraction of total steps when in [0,1).",
+    )
     train_parser.add_argument("--weight-decay", type=float, default=0.0)
     train_parser.add_argument("--logging-steps", type=int, default=10)
     train_parser.add_argument("--save-steps", type=int, default=250)

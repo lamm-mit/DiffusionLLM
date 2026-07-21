@@ -446,7 +446,7 @@ uv run diffusion-llm train \
   --eval-batch-size 2 \
   --gradient-accumulation-steps 64 \
   --learning-rate 1e-5 \
-  --warmup-ratio 0.03 \
+  --warmup-steps 0.03 \
   --weight-decay 0.1 \
   --mask-prompt-loss \
   --max-eval-samples 512 \
@@ -547,7 +547,7 @@ uv run diffusion-llm train \
   --eval-batch-size 2 \
   --gradient-accumulation-steps 32 \
   --learning-rate 5e-6 \
-  --warmup-ratio 0.03 \
+  --warmup-steps 0.03 \
   --weight-decay 0.1 \
   --mask-prompt-loss \
   --max-eval-samples 256 \

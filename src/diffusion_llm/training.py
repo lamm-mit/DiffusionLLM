@@ -45,7 +45,7 @@ class TrainConfig:
     batch_size: int = 4
     eval_batch_size: int = 4
     gradient_accumulation_steps: int = 1
-    warmup_ratio: float = 0.03
+    warmup_steps: float = 0.03
     weight_decay: float = 0.0
     logging_steps: int = 10
     save_steps: int = 250
@@ -179,7 +179,7 @@ def _build_training_arguments(
         max_steps=config.max_steps,
         learning_rate=config.learning_rate,
         weight_decay=config.weight_decay,
-        warmup_ratio=config.warmup_ratio,
+        warmup_steps=config.warmup_steps,
         per_device_train_batch_size=config.batch_size,
         per_device_eval_batch_size=config.eval_batch_size,
         gradient_accumulation_steps=config.gradient_accumulation_steps,
