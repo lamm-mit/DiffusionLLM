@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -137,6 +138,34 @@ def test_hub_training_arguments_are_forwarded(tmp_path: Path) -> None:
     assert arguments.hub_private_repo
     assert arguments.hub_strategy.value == "checkpoint"
     assert arguments.warmup_steps == pytest.approx(0.03)
+
+
+def test_wandb_tracking_defaults_and_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("WANDB_PROJECT", raising=False)
+    monkeypatch.delenv("WANDB_ENTITY", raising=False)
+    output = tmp_path / "descriptive-run"
+    config = TrainConfig(
+        model="base",
+        dataset="data",
+        output=str(output),
+        report_to="wandb",
+        wandb_entity="lamm-mit",
+    )
+
+    arguments = _build_training_arguments(config, output, has_eval=False)
+
+    assert arguments.report_to == ["wandb"]
+    assert arguments.run_name == "descriptive-run"
+    assert os.environ["WANDB_PROJECT"] == "DiffusionLLM"
+    assert os.environ["WANDB_ENTITY"] == "lamm-mit"
+
+    monkeypatch.setenv("WANDB_PROJECT", "EnvironmentOverride")
+    overridden = _build_training_arguments(config, output, has_eval=False)
+    assert overridden.run_name == "descriptive-run"
+    assert os.environ["WANDB_PROJECT"] == "EnvironmentOverride"
 
 
 def test_push_to_hub_requires_model_id(tmp_path: Path) -> None:

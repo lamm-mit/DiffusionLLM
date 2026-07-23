@@ -315,6 +315,41 @@ uv run diffusion-llm generate \
   --gif-frame-duration-ms 140
 ```
 
+## Weights & Biases experiment tracking
+
+W&B is optional and training remains offline by default. Install and
+authenticate it once on a standard installation:
+
+```bash
+uv sync --extra tracking
+uv run wandb login
+```
+
+On a DGX Spark installation whose CUDA PyTorch wheel must remain untouched:
+
+```bash
+uv pip install wandb
+uv run --no-sync wandb login
+```
+
+Enable reporting by replacing `--report-to none` with:
+
+```bash
+  --report-to wandb \
+  --wandb-project DiffusionLLM \
+  --run-name qwen2.5-1.5b-chatmix-1024
+```
+
+`DiffusionLLM` is the default W&B project, so `--wandb-project` may be omitted.
+Without `--run-name`, the output directory's basename becomes the run name.
+Use `--wandb-entity` for a user or team namespace. Existing `WANDB_PROJECT` and
+`WANDB_ENTITY` environment variables take precedence over CLI defaults.
+
+Transformers automatically reports training/evaluation loss, learning rate,
+gradient norm, epoch, and global step. W&B model artifact upload remains off by
+default because this project already supports Hugging Face Hub checkpoints; set
+`WANDB_LOG_MODEL=end` or `checkpoint` explicitly if both are desired.
+
 ## Push models to the Hugging Face Hub
 
 Authenticate once with a write-capable Hugging Face token:

@@ -144,6 +144,19 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--lora-alpha", type=int, default=32)
     train_parser.add_argument("--lora-dropout", type=float, default=0.05)
     train_parser.add_argument("--report-to", default="none", help="none, wandb, tensorboard, ...")
+    train_parser.add_argument(
+        "--run-name",
+        help="Experiment run name; W&B defaults to the output directory name.",
+    )
+    train_parser.add_argument(
+        "--wandb-project",
+        default="DiffusionLLM",
+        help="W&B project used when --report-to includes wandb.",
+    )
+    train_parser.add_argument(
+        "--wandb-entity",
+        help="Optional W&B user or team entity.",
+    )
     train_parser.add_argument("--resume-from-checkpoint")
     train_parser.add_argument(
         "--push-to-hub",

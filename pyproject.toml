@@ -36,6 +36,9 @@ dev = [
     "pytest>=8",
     "ruff>=0.11",
 ]
+tracking = [
+    "wandb>=0.19",
+]
 
 [project.scripts]
 diffusion-llm = "diffusion_llm.cli:main"

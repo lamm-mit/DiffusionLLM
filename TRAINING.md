@@ -463,6 +463,25 @@ uv run diffusion-llm train \
   --hub-strategy every_save
 ```
 
+To report this run to W&B, first install the optional SDK and authenticate:
+
+```bash
+uv pip install wandb
+uv run --no-sync wandb login
+```
+
+Then replace `--report-to none` in the training command with:
+
+```bash
+  --report-to wandb \
+  --wandb-project DiffusionLLM \
+  --run-name qwen2.5-1.5b-chatmix-1024-2m
+```
+
+The project defaults to `DiffusionLLM`, and the run name defaults to the output
+directory basename. A process launched with `--report-to none` cannot be
+switched to live W&B reporting without restarting it.
+
 Per-device batch 2 and gradient accumulation 64 give effective batch 128.
 There are approximately 15,625 optimizer steps in one epoch before examples
 whose assistant target is completely truncated are removed. Training examples

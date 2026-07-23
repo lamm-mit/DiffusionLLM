@@ -176,6 +176,14 @@ def test_train_cli_parses_hub_options() -> None:
             "checkpoint",
             "--warmup-steps",
             "0.05",
+            "--report-to",
+            "wandb",
+            "--wandb-project",
+            "DiffusionLLM",
+            "--wandb-entity",
+            "lamm-mit",
+            "--run-name",
+            "classroom-run",
         ]
     )
 
@@ -184,6 +192,10 @@ def test_train_cli_parses_hub_options() -> None:
     assert args.hub_private
     assert args.hub_strategy == "checkpoint"
     assert args.warmup_steps == pytest.approx(0.05)
+    assert args.report_to == "wandb"
+    assert args.wandb_project == "DiffusionLLM"
+    assert args.wandb_entity == "lamm-mit"
+    assert args.run_name == "classroom-run"
 
 
 def test_build_mixture_cli_uses_safe_upload_default() -> None:

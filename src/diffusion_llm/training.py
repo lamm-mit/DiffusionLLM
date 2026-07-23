@@ -6,6 +6,7 @@ Run ``python -m diffusion_llm train --help`` to launch training.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,9 @@ class TrainConfig:
     lora_alpha: int = 32
     lora_dropout: float = 0.05
     report_to: str = "none"
+    run_name: str | None = None
+    wandb_project: str = "DiffusionLLM"
+    wandb_entity: str | None = None
     resume_from_checkpoint: str | None = None
     push_to_hub: bool = False
     hub_model_id: str | None = None
@@ -173,6 +177,13 @@ def _build_training_arguments(
 ) -> TrainingArguments:
     """Translate the stable project config into Transformers arguments."""
     report_targets = [] if config.report_to in {"", "none"} else config.report_to.split(",")
+    run_name = config.run_name
+    if "wandb" in report_targets:
+        os.environ.setdefault("WANDB_PROJECT", config.wandb_project)
+        if config.wandb_entity:
+            os.environ.setdefault("WANDB_ENTITY", config.wandb_entity)
+        if run_name is None:
+            run_name = output_dir.name
     return TrainingArguments(
         output_dir=str(output_dir),
         num_train_epochs=config.epochs,
@@ -195,6 +206,7 @@ def _build_training_arguments(
         fp16=config.fp16,
         gradient_checkpointing=config.gradient_checkpointing,
         report_to=report_targets,
+        run_name=run_name,
         remove_unused_columns=False,
         dataloader_pin_memory=torch.cuda.is_available(),
         seed=config.seed,
