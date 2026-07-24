@@ -247,6 +247,27 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("schedule", "uniform"),
         default="schedule",
     )
+    train_parser.add_argument(
+        "--objective",
+        choices=("legacy-mdlm", "mdlm-v2"),
+        default="legacy-mdlm",
+        help="Legacy behavior is unchanged; mdlm-v2 enables explicit v2 corruption.",
+    )
+    train_parser.add_argument(
+        "--time-sampling",
+        choices=("uniform", "stratified"),
+        default="uniform",
+    )
+    train_parser.add_argument(
+        "--mask-sampling",
+        choices=("bernoulli", "uniform-count"),
+        default="bernoulli",
+    )
+    train_parser.add_argument(
+        "--loss-normalization",
+        choices=("token", "sequence"),
+        default="token",
+    )
     train_parser.add_argument("--seed", type=int, default=42)
     train_parser.add_argument("--bf16", action="store_true")
     train_parser.add_argument("--fp16", action="store_true")

@@ -198,6 +198,49 @@ def test_train_cli_parses_hub_options() -> None:
     assert args.run_name == "classroom-run"
 
 
+def test_train_cli_preserves_legacy_defaults_and_parses_v2_objective() -> None:
+    parser = cli.build_parser()
+    legacy = parser.parse_args(
+        [
+            "train",
+            "--model",
+            "base",
+            "--dataset",
+            "data",
+            "--output",
+            "output",
+        ]
+    )
+    v2 = parser.parse_args(
+        [
+            "train",
+            "--model",
+            "base",
+            "--dataset",
+            "data",
+            "--output",
+            "output",
+            "--objective",
+            "mdlm-v2",
+            "--time-sampling",
+            "stratified",
+            "--mask-sampling",
+            "uniform-count",
+            "--loss-normalization",
+            "sequence",
+        ]
+    )
+
+    assert legacy.objective == "legacy-mdlm"
+    assert legacy.time_sampling == "uniform"
+    assert legacy.mask_sampling == "bernoulli"
+    assert legacy.loss_normalization == "token"
+    assert v2.objective == "mdlm-v2"
+    assert v2.time_sampling == "stratified"
+    assert v2.mask_sampling == "uniform-count"
+    assert v2.loss_normalization == "sequence"
+
+
 def test_evaluate_cli_parses_heldout_generation_options() -> None:
     args = cli.build_parser().parse_args(
         [

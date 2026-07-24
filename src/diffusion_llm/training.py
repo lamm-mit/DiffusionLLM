@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from transformers import Trainer, TrainingArguments, set_seed
 
 from diffusion_llm.collator import DiffusionDataCollator
+from diffusion_llm.corruption import build_full_corruption, reduce_diffusion_loss
 from diffusion_llm.data import load_splits, prepare_pretraining, prepare_sft
 from diffusion_llm.loading import load_model, load_tokenizer
 from diffusion_llm.schedule import loss_weight, mask_probability
@@ -54,6 +55,10 @@ class TrainConfig:
     save_total_limit: int = 2
     time_epsilon: float = 1e-3
     loss_weighting: str = "schedule"
+    objective: str = "legacy-mdlm"
+    time_sampling: str = "uniform"
+    mask_sampling: str = "bernoulli"
+    loss_normalization: str = "token"
     seed: int = 42
     bf16: bool = False
     fp16: bool = False
@@ -82,6 +87,10 @@ class MDLMTrainer(Trainer):
         mask_token_id: int,
         time_epsilon: float = 1e-3,
         loss_weighting: str = "schedule",
+        objective: str = "legacy-mdlm",
+        time_sampling: str = "uniform",
+        mask_sampling: str = "bernoulli",
+        loss_normalization: str = "token",
         **kwargs: Any,
     ):
         super().__init__(*args, **kwargs)
@@ -95,9 +104,21 @@ class MDLMTrainer(Trainer):
             raise ValueError("time_epsilon must lie in (0, 1).")
         if loss_weighting not in {"schedule", "uniform"}:
             raise ValueError("loss_weighting must be 'schedule' or 'uniform'.")
+        if objective not in {"legacy-mdlm", "mdlm-v2"}:
+            raise ValueError("objective must be 'legacy-mdlm' or 'mdlm-v2'.")
+        if time_sampling not in {"uniform", "stratified"}:
+            raise ValueError("time_sampling must be 'uniform' or 'stratified'.")
+        if mask_sampling not in {"bernoulli", "uniform-count"}:
+            raise ValueError("mask_sampling must be 'bernoulli' or 'uniform-count'.")
+        if loss_normalization not in {"token", "sequence"}:
+            raise ValueError("loss_normalization must be 'token' or 'sequence'.")
         self.mask_token_id = mask_token_id
         self.time_epsilon = time_epsilon
         self.loss_weighting = loss_weighting
+        self.objective = objective
+        self.time_sampling = time_sampling
+        self.mask_sampling = mask_sampling
+        self.loss_normalization = loss_normalization
 
     def compute_loss(
         self,
@@ -106,6 +127,50 @@ class MDLMTrainer(Trainer):
         return_outputs: bool = False,
         **_: Any,
     ):
+        if self.objective == "legacy-mdlm":
+            return self._compute_legacy_loss(
+                model,
+                inputs,
+                return_outputs=return_outputs,
+            )
+
+        input_ids = inputs["input_ids"]
+        labels = inputs["labels"]
+        attention_mask = inputs.get("attention_mask")
+        corruption = build_full_corruption(
+            input_ids,
+            labels,
+            mask_token_id=self.mask_token_id,
+            time_epsilon=self.time_epsilon,
+            time_sampling=self.time_sampling,
+            mask_sampling=self.mask_sampling,
+            loss_weighting=self.loss_weighting,
+        )
+        outputs = model(
+            input_ids=corruption.noised_ids,
+            attention_mask=attention_mask,
+            use_cache=False,
+        )
+        token_loss = F.cross_entropy(
+            outputs.logits.transpose(1, 2),
+            input_ids,
+            reduction="none",
+        )
+        loss = reduce_diffusion_loss(
+            token_loss,
+            corruption,
+            normalization=self.loss_normalization,
+        )
+        return (loss, outputs) if return_outputs else loss
+
+    def _compute_legacy_loss(
+        self,
+        model: torch.nn.Module,
+        inputs: dict[str, torch.Tensor],
+        *,
+        return_outputs: bool,
+    ):
+        """Original loss path retained verbatim for checkpoint reproducibility."""
         input_ids = inputs["input_ids"]
         labels = inputs["labels"]
         attention_mask = inputs.get("attention_mask")
@@ -282,6 +347,10 @@ def train(config: TrainConfig) -> Path:
         mask_token_id=tokenizer.mask_token_id,
         time_epsilon=config.time_epsilon,
         loss_weighting=config.loss_weighting,
+        objective=config.objective,
+        time_sampling=config.time_sampling,
+        mask_sampling=config.mask_sampling,
+        loss_normalization=config.loss_normalization,
     )
     trainer.train(resume_from_checkpoint=config.resume_from_checkpoint)
     (output_dir / "training_config.json").write_text(
