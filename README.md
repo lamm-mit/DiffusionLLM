@@ -16,14 +16,20 @@ training it, and generating text by iterative denoising.
 
 - AR-to-diffusion conversion for Qwen2/Qwen2.5, Qwen3, and Llama models (others can be added).
 - Padding-aware bidirectional attention with the original pretrained weights.
-- Continuous-time absorbing-mask MDLM training.
+- Exact legacy MDLM plus opt-in v2, block-shift, and hybrid objectives.
+- Stratified time sampling, exact-count and progressive confidence masks.
+- Optional CFG prompt dropout, masked-tail consistency, explicit time encoding,
+  and draft self-conditioning.
 - Raw-text continual pretraining and supervised fine-tuning.
 - Full-parameter and LoRA training.
 - Parallel and blockwise iterative denoising.
 - Chat-template-aware SFT and inference.
-- Reproducible held-out generation evaluation with JSONL records and summaries.
+- Reproducible held-out generation evaluation plus deterministic
+  fixed-corruption NLL, accuracy, confidence, and calibration metrics.
 - Animated GIF export of the complete denoising trajectory.
 - Optional automatic model and checkpoint uploads to the Hugging Face Hub.
+- Run manifests with dataset fingerprints, git/software/hardware provenance,
+  effective batch size, and safe resume validation.
 - Manifest-driven, exact-size chat-mixture construction with recoverable uploads.
 - Local files, saved `datasets` directories, and Hugging Face Hub datasets.
 - Offline unit tests, attention tests, and an end-to-end training test.
@@ -361,10 +367,10 @@ available with `--remask-eos`, but disables safe early stopping.
 
 The command below is the original UltraChat baseline. For the larger next-stage
 run, use **[the complete 2M-example, 1,024-token recipe](TRAINING.md)**. It
-starts from the published UltraChat diffusion model, broadens the instruction
-mixture, uses one deliberate epoch at a lower learning rate, uploads each
-checkpoint update to the Hub repository root, and tests generation on a second
-GPU.
+contains both a same-position continuation of the published UltraChat model and
+the recommended new shifted/block-causal conversion with progressive masks,
+condition dropout, tail consistency, time encoding, and draft
+self-conditioning. It also covers Hub checkpoints and second-GPU testing.
 
 For materially better results, use a stronger instruction-tuned
 initialization, high-quality conversational data, full-model training, and
@@ -494,6 +500,38 @@ and decoding settings fixed. `--temperature 0` makes token selection
 deterministic. Lexical F1 measures surface overlap only; open-ended chat quality
 should be assessed by inspecting the saved generations or with a blinded human
 or LLM judge.
+
+For a faster model-level comparison that does not depend on generation policy,
+evaluate the same exact corruption counts at five fixed mask fractions:
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
+CUDA_VISIBLE_DEVICES=0 \
+uv run --no-sync diffusion-llm evaluate-denoising \
+  --model "$MODEL" \
+  --dataset lamm-mit/diffusion-chat-mixture-1024 \
+  --dataset-config chatmix_2m \
+  --split validation \
+  --mode sft \
+  --max-length 1024 \
+  --num-samples 512 \
+  --batch-size 4 \
+  --mask-probabilities 0.15,0.30,0.50,0.70,0.90 \
+  --block-size 16 \
+  --calibration-bins 10 \
+  --dtype bfloat16 \
+  --device cuda:0 \
+  --seed 1729 \
+  --output artifacts/checkpoint-denoising-metrics.json
+```
+
+The same seed selects the same exact masked positions for every checkpoint.
+The output reports masked-token NLL, perplexity, top-1 reconstruction accuracy,
+mean confidence, and expected calibration error at each corruption level. For
+a block-causal checkpoint, `--block-size` defines the deterministic active
+evaluation block; for a full-bidirectional checkpoint it is ignored. Use these
+metrics to diagnose the denoiser, and the `evaluate` command to diagnose the
+complete sampler.
 
 ## Weights & Biases experiment tracking
 
@@ -671,29 +709,37 @@ was trained without a chat template.
 
 ## Exact method
 
-This repository implements a **continuous-time masked diffusion language model
-(MDLM) with an absorbing mask state**.
+This repository implements a family of **absorbing-mask diffusion language
+models** with one compatibility baseline and opt-in research improvements.
+Every old checkpoint remains on `legacy-mdlm`. Training inherits the
+checkpoint's objective, prediction alignment, attention pattern, and time
+conditioner unless those flags are overridden explicitly.
 
 ### Model conversion
 
 The converter preserves the tokenizer, token embeddings, transformer blocks,
 LM head, pretrained weights, and the source model's rotary token positions. It
 replaces lower-triangular causal attention with padding-aware bidirectional
-attention and adds one mask token.
+attention and adds one mask token. New conversions may also choose:
+
+```bash
+  --prediction-parameterization shifted \
+  --attention-pattern block-causal \
+  --time-conditioning additive
+```
+
+`same-position` plus `full-bidirectional` is the legacy architecture.
+`shifted` reuses the pretrained AR alignment: the raw logit at position
+`i - 1` predicts clean token `i`. `block-causal` keeps completed-prefix
+representations causal while the active block is bidirectional; the final
+prefix query is included in the active region for the first shifted token.
 
 ### Forward corruption and objective
 
-For every sequence:
-
-1. Sample one scalar diffusion time
-   $t \sim U(\epsilon,1)$, with $\epsilon=10^{-3}$ by default.
-2. Use the linear survival schedule $\alpha(t)=1-t$.
-3. Independently replace each trainable token by the mask token with
-   probability $1-\alpha(t)=t$.
-4. Predict the clean token at the same position from the bidirectional noised
-   sequence. There is no causal right shift.
-5. Apply the continuous-time schedule weight
-   $-\alpha'(t)/(1-\alpha(t))=1/t$ only to corrupted target positions.
+`--objective legacy-mdlm` exactly preserves the original estimator. For every
+sequence it samples $t\sim U(\epsilon,1)$, uses
+$\alpha(t)=1-t$, independently masks targets with probability $t$, predicts
+the clean same-position token, and weights masked cross-entropy by $1/t$:
 
 ```math
 \mathcal{L}
@@ -706,12 +752,58 @@ For every sequence:
 \right].
 ```
 
+`--objective mdlm-v2` exposes stratified time sampling, exact uniform mask
+counts, and token- or sequence-normalized reduction. `--objective block-mdlm`
+selects one random target block per row, keeps the earlier prefix visible,
+diffuses the active block, and masks all later target blocks. `block-hybrid`
+mixes block states with full-span states using `--full-mdlm-ratio`.
+`--ar-loss-weight` retains a shifted causal loss on clean prefix positions.
+
+`--mask-sampling progressive` is a stateless, PUMA-inspired training rollout.
+A no-gradient proposal sees the fully masked active region; the clean tokens
+with greatest ground-truth proposal confidence are revealed to a randomly
+sampled phase, and the remaining masks receive sequence-normalized loss.
+`--progressive-mask-probability` mixes these inference-like states with the
+lower-cost exact-count objective.
+
+The other opt-in training mechanisms are:
+
+- `--condition-dropout`: replaces an entire SFT prompt by masks or padding for
+  classifier-free guidance training;
+- `--mask-tail-augmentation`: appends a random masked canvas after the real
+  sequence, while `--mask-consistency-weight` matches predictions with and
+  without that distracting tail;
+- `--self-conditioning-probability`: obtains a no-gradient draft, makes a
+  subset of predicted tokens visible, trains remaining masks, and applies
+  `--draft-loss-weight` to correction targets at draft positions; and
+- `--train-block-sizes`: samples multiple block scales so one checkpoint can
+  be evaluated at different inference block sizes.
+
+These mechanisms require `mdlm-v2`, `block-mdlm`, or `block-hybrid`. Learned
+remasking/quality heads are intentionally deferred; inference remasking remains
+training-free.
+
+The design is informed by
+[LLaDA](https://github.com/ML-GSAI/LLaDA),
+[Block Diffusion](https://arxiv.org/abs/2503.09573),
+[Fast-dLLM v2](https://github.com/NVlabs/Fast-dLLM/tree/main/v2),
+[PUMA](https://github.com/JaeyeonKim01/PUMA),
+[Masks Can Be Distracting](https://openreview.net/forum?id=CdJwNTisx1), and
+[self-conditioned masked diffusion](https://arxiv.org/abs/2604.26985).
+DiffusionLLM adapts those ideas to one compact Transformers training path; it
+does not claim checkpoint or algorithm equivalence to those systems.
+
 ### Time encoding
 
-**The network receives no explicit diffusion-time encoding.** Time $t$ is used
-by the corruption sampler and loss weighting, but is not embedded, added to
-token states, or passed to the Transformer. The denoiser conditions on $x_t$
-itself, particularly the locations and fraction of mask tokens.
+The default remains `--time-conditioning none`: the denoiser infers noise from
+the mask pattern, as in the original implementation. With
+`--time-conditioning additive`, the model converts the actual masked fraction
+of the active target region into a sinusoidal vector, passes it through a
+two-layer MLP, and adds the result to every input-token embedding. The final
+projection is zero-initialized, so enabling the module is an exact no-op before
+it learns. During generation the sampler recomputes this fraction for every
+active block and sends the same value to conditional and CFG-unconditional
+forwards.
 
 The original Qwen/Llama rotary position embeddings remain active. They encode
 token position in the sequence, not diffusion time.
@@ -734,8 +826,8 @@ Remasking may be restricted to the current block, current plus previous block,
 or all completed response blocks. Prompt tokens are never eligible.
 
 This is iterative absorbing-mask denoising. It is not Gaussian diffusion, does
-not use a learned time embedding, and is not an exact ancestral sampler for a
-general discrete transition matrix.
+not require an explicit time embedding, and is not an exact ancestral sampler
+for a general discrete transition matrix.
 
 See [docs/method.md](docs/method.md) for the longer derivation and
 [docs/classroom-lab.md](docs/classroom-lab.md) for a lab to get started locally and explore the code and associated method.
@@ -748,6 +840,8 @@ diffusion-llm build-mixture  source manifest -> exact-size chat DatasetDict
 diffusion-llm upload-mixture saved DatasetDict -> Hugging Face Hub
 diffusion-llm train     continual pretraining or SFT
 diffusion-llm generate  one-shot denoising, optionally with GIF export
+diffusion-llm evaluate  held-out end-to-end generation benchmark
+diffusion-llm evaluate-denoising  deterministic fixed-corruption metrics
 diffusion-llm chat      interactive multi-turn inference
 diffusion-llm doctor    dependency, device, and checkpoint inspection
 ```
@@ -771,6 +865,13 @@ budget over actual model forwards and includes CFG and rescore probes. Every
 unfinished block is guaranteed to resolve or the CLI exits with a clear budget
 error rather than silently returning masks.
 
+Each training output contains `training_config.json` and `run_manifest.json`.
+The manifest records method choices, dataset fingerprints, effective batch,
+parameter counts, package versions, CUDA devices, and git state. Resuming
+validates training-critical fields before overwriting either file. Logging,
+checkpoint cadence, run labels, and Hub settings may change; use
+`--allow-resume-mismatch` only for a deliberate optimizer-state experiment.
+
 ## Verification
 
 ```bash
@@ -783,12 +884,15 @@ The suite checks:
 - future tokens affect earlier logits;
 - padding does not change real-token logits;
 - converted checkpoints reload through `AutoModelForMaskedLM`;
+- legacy, v2, block-shift, progressive, time-conditioned, and
+  self-conditioned objectives backpropagate;
 - mask-token embedding sizes match the tokenizer;
 - reveal schedules fill every mask;
 - prompts remain immutable;
 - long denoising histories render as valid multi-frame GIFs;
 - diffusion loss is finite and differentiable; and
 - custom diffusion loss is normalized correctly during gradient accumulation;
+- fixed-corruption metrics are deterministic and resume drift is rejected;
 - conversion, local data, training, save, reload, and generation work together.
 
 ## Project layout
@@ -802,6 +906,10 @@ DiffusionLLM/
 │   ├── data.py          # local and Hub datasets
 │   ├── mixture.py       # configurable exact-size dataset mixtures
 │   ├── training.py      # continuous-time MDLM objective
+│   ├── corruption.py    # v2, block, and progressive corruption
+│   ├── attention.py     # full and block-causal masks
+│   ├── denoising_evaluation.py # fixed-corruption metrics
+│   ├── provenance.py    # manifests and resume validation
 │   ├── sampling.py      # iterative unmasking
 │   ├── schedule.py      # corruption and reveal schedules
 │   ├── visualization.py # denoising GIF renderer
@@ -817,9 +925,10 @@ DiffusionLLM/
 - Only Qwen2/Qwen2.5, Qwen3, and Llama-family decoder layouts are supported.
 - Diffusion inference performs repeated full-sequence forward passes and is
   slower than optimized production kernels.
-- This project intentionally excludes BD3LM, GRPO, lm-evaluation-harness,
-  DeepSpeed recipes, Slurm wrappers, and architecture-specific production
-  samplers.
+- Learned remasking/quality heads remain future work. This project also
+  intentionally excludes the full BD3LM cache architecture, GRPO,
+  lm-evaluation-harness, DeepSpeed recipes, Slurm wrappers, and
+  architecture-specific production kernels.
 
 ## Attribution
 

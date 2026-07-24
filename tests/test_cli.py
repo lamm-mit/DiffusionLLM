@@ -231,7 +231,7 @@ def test_train_cli_preserves_legacy_defaults_and_parses_v2_objective() -> None:
         ]
     )
 
-    assert legacy.objective == "legacy-mdlm"
+    assert legacy.objective is None
     assert legacy.time_sampling == "uniform"
     assert legacy.mask_sampling == "bernoulli"
     assert legacy.loss_normalization == "token"

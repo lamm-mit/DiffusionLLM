@@ -22,13 +22,11 @@ RUN_MANIFEST_NAME = "run_manifest.json"
 
 _RESUME_MUTABLE_FIELDS = {
     "allow_resume_mismatch",
-    "epochs",
     "eval_steps",
     "hub_model_id",
     "hub_private",
     "hub_strategy",
     "logging_steps",
-    "max_steps",
     "output",
     "push_to_hub",
     "report_to",

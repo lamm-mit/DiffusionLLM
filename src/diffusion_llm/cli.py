@@ -270,8 +270,10 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument(
         "--objective",
         choices=("legacy-mdlm", "mdlm-v2", "block-mdlm", "block-hybrid"),
-        default="legacy-mdlm",
-        help="Legacy behavior is unchanged; mdlm-v2 enables explicit v2 corruption.",
+        help=(
+            "Defaults to the checkpoint setting, or legacy-mdlm for old "
+            "checkpoints; mdlm-v2 enables explicit v2 corruption."
+        ),
     )
     train_parser.add_argument(
         "--time-sampling",
@@ -298,12 +300,12 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument(
         "--prediction-parameterization",
         choices=("same-position", "shifted"),
-        default="same-position",
+        help="Defaults to the checkpoint setting, or same-position for old checkpoints.",
     )
     train_parser.add_argument(
         "--attention-pattern",
         choices=("full-bidirectional", "block-causal"),
-        default="full-bidirectional",
+        help="Defaults to the checkpoint setting, or full-bidirectional for old checkpoints.",
     )
     train_parser.add_argument("--train-block-sizes", default="16,32,64")
     train_parser.add_argument("--full-mdlm-ratio", type=float, default=0.25)
@@ -325,9 +327,13 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument(
         "--time-conditioning",
         choices=("none", "additive"),
-        default="none",
+        help="Defaults to the checkpoint setting, or none for old checkpoints.",
     )
-    train_parser.add_argument("--time-embedding-dim", type=int, default=256)
+    train_parser.add_argument(
+        "--time-embedding-dim",
+        type=int,
+        help="Defaults to the checkpoint setting, or 256.",
+    )
     train_parser.add_argument(
         "--self-conditioning-probability",
         type=float,
@@ -902,6 +908,31 @@ def _doctor_payload(model_path: str | None) -> dict[str, object]:
             "model_type": config.model_type,
             "architecture": getattr(config, "architectures", None),
             "diffusion_method": getattr(config, "diffusion_method", None),
+            "training_version": getattr(
+                config,
+                "diffusion_training_version",
+                None,
+            ),
+            "training_objective": getattr(
+                config,
+                "diffusion_training_objective",
+                "legacy-mdlm",
+            ),
+            "prediction_parameterization": getattr(
+                config,
+                "diffusion_prediction_parameterization",
+                "same-position",
+            ),
+            "attention_pattern": getattr(
+                config,
+                "diffusion_attention_pattern",
+                "full-bidirectional",
+            ),
+            "time_conditioning": getattr(
+                config,
+                "diffusion_time_conditioning",
+                "none",
+            ),
             "source_model": getattr(config, "source_model_name_or_path", None),
             "vocab_size": config.vocab_size,
             "mask_token": tokenizer.mask_token,

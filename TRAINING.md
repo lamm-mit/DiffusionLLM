@@ -1,9 +1,10 @@
 # End-to-end training recipes
 
-This guide builds a 2,000,000-example chat mixture, continues the published
-Qwen2.5-1.5B diffusion checkpoint at a 1,024-token context length, uploads each
-saved model to the Hugging Face Hub, and generates a system-prompted answer
-with an animation of the denoising trajectory.
+This guide builds a 2,000,000-example chat mixture and provides two 1,024-token
+training tracks: an exact legacy-compatible continuation of the published
+Qwen2.5-1.5B diffusion checkpoint, and the recommended new block-shift model
+with inference-aligned training. Both tracks support Hub upload, deterministic
+evaluation, system-prompted generation, and denoising animations.
 
 The recommended curriculum is:
 
@@ -422,7 +423,7 @@ Because `CUDA_VISIBLE_DEVICES=1` exposes only the physical RTX 6000 Ada, that
 GPU is named `cuda:0` inside the process. The RTX 5000 Ada remains available to
 another terminal as physical GPU 0.
 
-## 4. Train the 1,024-token model
+## 4. Train the legacy-compatible 1,024-token model
 
 This run starts from the existing 512-token diffusion model. Qwen rotary
 positions support length 1024 without changing the architecture. The longer
@@ -497,7 +498,12 @@ rerunning the same command with:
 ```
 
 Do not change the batch, accumulation, learning-rate schedule, dataset order,
-or output directory while resuming an optimizer state.
+or output directory while resuming an optimizer state. DiffusionLLM compares
+the new command with the saved `training_config.json` and rejects
+training-critical drift before starting. Logging/save cadence, Hub settings,
+and run labels may change. `--allow-resume-mismatch` exists for controlled
+research only; it does not make a changed objective, optimizer schedule, batch,
+or training horizon mathematically equivalent.
 
 To start from the original AR model instead, first convert it and replace the
 training command's `--model` value. This is a colder start and is expected to
@@ -510,7 +516,169 @@ uv run diffusion-llm convert \
   --dtype bfloat16
 ```
 
-## 5. Test a checkpoint on the other GPU
+## 5. Train the recommended block-shift model
+
+This is the new model/trainer path. It deliberately starts from the original
+AR checkpoint because shifted prediction preserves the AR next-token alignment.
+Do not change a mature same-position diffusion checkpoint to shifted prediction
+mid-run and assume the optimizer state remains comparable.
+
+Create a block-causal, shifted, time-conditioned initialization:
+
+```bash
+uv run --no-sync diffusion-llm convert \
+  --source Qwen/Qwen2.5-1.5B-Instruct \
+  --output artifacts/qwen2.5-1.5b-diffusion-block-shift-base \
+  --dtype bfloat16 \
+  --prediction-parameterization shifted \
+  --attention-pattern block-causal \
+  --time-conditioning additive \
+  --time-embedding-dim 256
+```
+
+First run the complete objective for two steps. Keep every method flag identical
+to the long run:
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
+CUDA_VISIBLE_DEVICES=0 \
+uv run --no-sync diffusion-llm train \
+  --model artifacts/qwen2.5-1.5b-diffusion-block-shift-base \
+  --dataset lamm-mit/diffusion-chat-mixture-1024 \
+  --dataset-config chatmix_2m \
+  --train-split train \
+  --eval-split validation \
+  --mode sft \
+  --output artifacts/qwen2.5-1.5b-block-shift-v3-smoke \
+  --max-length 1024 \
+  --max-train-samples 512 \
+  --max-eval-samples 32 \
+  --max-steps 2 \
+  --batch-size 4 \
+  --eval-batch-size 2 \
+  --gradient-accumulation-steps 2 \
+  --learning-rate 3e-5 \
+  --objective block-hybrid \
+  --prediction-parameterization shifted \
+  --attention-pattern block-causal \
+  --train-block-sizes 8,16,32,64 \
+  --full-mdlm-ratio 0.20 \
+  --ar-loss-weight 0.10 \
+  --time-sampling stratified \
+  --mask-sampling progressive \
+  --progressive-stages 8 \
+  --progressive-mask-probability 0.50 \
+  --loss-normalization sequence \
+  --condition-dropout 0.10 \
+  --condition-dropout-mode mask \
+  --mask-tail-augmentation 0.10 \
+  --mask-tail-max-tokens 64 \
+  --mask-consistency-weight 0.05 \
+  --time-conditioning additive \
+  --time-embedding-dim 256 \
+  --self-conditioning-probability 0.25 \
+  --draft-commit-probability 0.25 \
+  --draft-loss-weight 0.10 \
+  --mask-prompt-loss \
+  --num-proc 16 \
+  --gradient-checkpointing \
+  --bf16 \
+  --report-to none
+```
+
+If the smoke test fits, launch the full DGX Spark run:
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
+CUDA_VISIBLE_DEVICES=0 \
+uv run --no-sync diffusion-llm train \
+  --model artifacts/qwen2.5-1.5b-diffusion-block-shift-base \
+  --dataset lamm-mit/diffusion-chat-mixture-1024 \
+  --dataset-config chatmix_2m \
+  --train-split train \
+  --eval-split validation \
+  --mode sft \
+  --output artifacts/qwen2.5-1.5b-diffusion-chatmix-1024-2m-block-shift-v3 \
+  --max-length 1024 \
+  --epochs 1 \
+  --batch-size 4 \
+  --eval-batch-size 2 \
+  --gradient-accumulation-steps 32 \
+  --learning-rate 3e-5 \
+  --warmup-steps 500 \
+  --weight-decay 0.1 \
+  --objective block-hybrid \
+  --prediction-parameterization shifted \
+  --attention-pattern block-causal \
+  --train-block-sizes 8,16,32,64 \
+  --full-mdlm-ratio 0.20 \
+  --ar-loss-weight 0.10 \
+  --time-sampling stratified \
+  --mask-sampling progressive \
+  --progressive-stages 8 \
+  --progressive-mask-probability 0.50 \
+  --loss-normalization sequence \
+  --condition-dropout 0.10 \
+  --condition-dropout-mode mask \
+  --mask-tail-augmentation 0.10 \
+  --mask-tail-max-tokens 64 \
+  --mask-consistency-weight 0.05 \
+  --time-conditioning additive \
+  --time-embedding-dim 256 \
+  --self-conditioning-probability 0.25 \
+  --draft-commit-probability 0.25 \
+  --draft-loss-weight 0.10 \
+  --mask-prompt-loss \
+  --max-eval-samples 512 \
+  --logging-steps 10 \
+  --save-steps 1000 \
+  --eval-steps 1000 \
+  --save-total-limit 5 \
+  --num-proc 16 \
+  --gradient-checkpointing \
+  --bf16 \
+  --report-to wandb \
+  --wandb-project DiffusionLLM \
+  --run-name qwen2.5-1.5b-chatmix-block-shift-v3 \
+  --push-to-hub \
+  --hub-model-id lamm-mit/qwen2.5-1.5b-diffusion-chatmix-1024-2m-block-shift-v3 \
+  --hub-strategy every_save
+```
+
+Batch 4 and accumulation 32 give effective batch 128 and approximately 15,625
+optimizer updates over 2M examples. This run is intentionally more expensive
+than legacy MDLM: progressive and draft states sometimes add a no-gradient
+proposal forward, while tail consistency sometimes adds another reference
+forward. Proposal work is shared when progressive masking and
+self-conditioning occur together.
+
+The new pieces have distinct purposes:
+
+| Mechanism | Purpose | Primary cost |
+| --- | --- | --- |
+| shifted + block-causal | retain AR next-token skill while denoising a block | no extra forward |
+| block-hybrid | match block generation while retaining some full-span ability | no extra forward |
+| stratified/exact-count base | cover corruption levels more evenly | negligible |
+| progressive masks | train on confidence-ordered intermediate sampler states | proposal forward |
+| condition dropout | make CFG unconditional states familiar | negligible |
+| masked-tail consistency | resist long unresolved generation canvases | padding + occasional reference |
+| additive time encoding | expose the active masked fraction explicitly | small MLP |
+| draft self-conditioning | learn with plausible visible model predictions | proposal forward |
+
+`--mask-tail-augmentation` pads training batches to `--max-length`, so it can
+raise memory use even when the sampled augmentation probability is small. If
+the smoke test is out of memory, first set tail augmentation and consistency to
+zero; next reduce batch 4 to batch 2 and increase accumulation from 32 to 64.
+Keep effective batch 128.
+
+All advanced features are opt-in. Training inherits architecture and objective
+metadata from the checkpoint; an old checkpoint therefore still runs the exact
+legacy path when these flags are omitted. `training_config.json` records every
+resolved flag and `run_manifest.json` records the method, dataset fingerprints,
+effective batch, git revision, software/CUDA environment, and completion
+status.
+
+## 6. Test a checkpoint on the other GPU
 
 Run this while training uses physical GPU 1. The test process exposes physical
 GPU 0, which is again named `cuda:0` inside that process:
@@ -542,7 +710,77 @@ reveal iterations per block, so 512 steps fully uses this configuration. A
 larger `--steps` value is capped by the reveal schedule and does not add useful
 passes.
 
-## 6. Evaluate fixed held-out generations
+For the new block-shift checkpoint, no inference architecture flags are needed:
+the loader reads shifted prediction, block attention, and additive time
+conditioning from `config.json`. Condition dropout makes modest CFG strengths
+a trained use case, and draft training makes revision states less out of
+distribution:
+
+```bash
+MODEL=lamm-mit/qwen2.5-1.5b-diffusion-chatmix-1024-2m-block-shift-v3
+
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
+CUDA_VISIBLE_DEVICES=0 \
+uv run --no-sync diffusion-llm generate \
+  --model "$MODEL" \
+  --system-prompt "Answer accurately and explain the mechanism." \
+  --prompt "Why can a masked diffusion language model revise an earlier token?" \
+  --chat-template \
+  --max-new-tokens 512 \
+  --steps 768 \
+  --max-nfe 1024 \
+  --block-size 16 \
+  --temperature 0.2 \
+  --top-p 0.95 \
+  --commit-policy uncode \
+  --cfg-scale 0.5 \
+  --remask-policy confidence \
+  --remask-rate 0.05 \
+  --max-remasks-per-step 2 \
+  --max-revisions-per-token 2 \
+  --remask-window previous \
+  --remask-accept improve \
+  --device cuda:0 \
+  --gif artifacts/block-shift-v3-denoising.gif \
+  --gif-frame-duration-ms 100
+```
+
+Compare `--cfg-scale 0`, `0.5`, `1.0`, and `1.5`, and compare remasking with
+`--remask-policy none`; the new training makes those states familiar but does
+not guarantee that every sampler policy improves every task.
+
+## 7. Evaluate denoising and fixed held-out generations
+
+First compare model reconstruction independently of sampler policy:
+
+```bash
+MODEL=lamm-mit/qwen2.5-1.5b-diffusion-chatmix-1024-2m-block-shift-v3
+
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
+CUDA_VISIBLE_DEVICES=0 \
+uv run --no-sync diffusion-llm evaluate-denoising \
+  --model "$MODEL" \
+  --dataset lamm-mit/diffusion-chat-mixture-1024 \
+  --dataset-config chatmix_2m \
+  --split validation \
+  --mode sft \
+  --max-length 1024 \
+  --num-samples 512 \
+  --batch-size 4 \
+  --mask-probabilities 0.15,0.30,0.50,0.70,0.90 \
+  --block-size 16 \
+  --calibration-bins 10 \
+  --dtype bfloat16 \
+  --device cuda:0 \
+  --seed 1729 \
+  --output artifacts/block-shift-v3-denoising-metrics.json
+```
+
+This command masks an exact deterministic count per sequence, so repeated
+checkpoint comparisons use the same corrupted tokens. It reports NLL,
+perplexity, top-1 clean-token reconstruction accuracy, confidence, and ECE at
+each mask fraction. A block-causal checkpoint evaluates deterministic active
+blocks of `--block-size`; a full checkpoint evaluates the whole target span.
 
 The periodic `eval_loss` already measures the diffusion objective on 512
 held-out rows. Because evaluation samples new diffusion times and corruption
@@ -583,7 +821,7 @@ blindly. Exact match and lexical token F1 are diagnostics, not reliable measures
 of semantic quality for open-ended answers; use human inspection or a blinded
 LLM judge for the primary comparison.
 
-## 7. Continue on the scientific-design dataset
+## 8. Continue on the scientific-design dataset
 
 After the broad 1024-token stage, specialize at a lower learning rate. Three
 epochs over the 9k-example scientific split are a sensible first run; compare

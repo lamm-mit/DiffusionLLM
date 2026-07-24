@@ -131,6 +131,13 @@ def convert_checkpoint(
     target_config.diffusion_method = "mdlm"
     target_config.diffusion_prediction_parameterization = prediction_parameterization
     target_config.diffusion_attention_pattern = attention_pattern
+    target_config.diffusion_training_objective = (
+        "block-hybrid"
+        if attention_pattern == "block-causal"
+        else "legacy-mdlm"
+        if prediction_parameterization == "same-position"
+        else "mdlm-v2"
+    )
     target_config.diffusion_time_conditioning = time_conditioning
     target_config.diffusion_time_embedding_dim = time_embedding_dim
     target_config.diffusion_training_version = 1
@@ -169,6 +176,7 @@ def convert_checkpoint(
         "random_init": random_init,
         "prediction_parameterization": prediction_parameterization,
         "attention_pattern": attention_pattern,
+        "training_objective": target_config.diffusion_training_objective,
         "time_conditioning": time_conditioning,
         "time_embedding_dim": time_embedding_dim,
     }

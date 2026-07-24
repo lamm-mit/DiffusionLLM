@@ -72,12 +72,12 @@ class TrainConfig:
     save_total_limit: int = 2
     time_epsilon: float = 1e-3
     loss_weighting: str = "schedule"
-    objective: str = "legacy-mdlm"
+    objective: str | None = None
     time_sampling: str = "uniform"
     mask_sampling: str = "bernoulli"
     loss_normalization: str = "token"
-    prediction_parameterization: str = "same-position"
-    attention_pattern: str = "full-bidirectional"
+    prediction_parameterization: str | None = None
+    attention_pattern: str | None = None
     train_block_sizes: str = "16,32,64"
     full_mdlm_ratio: float = 0.25
     ar_loss_weight: float = 0.0
@@ -88,8 +88,8 @@ class TrainConfig:
     mask_tail_augmentation: float = 0.0
     mask_tail_max_tokens: int = 64
     mask_consistency_weight: float = 0.0
-    time_conditioning: str = "none"
-    time_embedding_dim: int = 256
+    time_conditioning: str | None = None
+    time_embedding_dim: int | None = None
     self_conditioning_probability: float = 0.0
     draft_commit_probability: float = 0.5
     draft_loss_weight: float = 0.1
@@ -669,6 +669,52 @@ def _build_training_arguments(
     )
 
 
+def _resolve_model_architecture(config: TrainConfig, model_config: Any) -> None:
+    """Inherit architecture options unless the training command overrides them."""
+    config.objective = (
+        config.objective
+        or getattr(
+            model_config,
+            "diffusion_training_objective",
+            "legacy-mdlm",
+        )
+    )
+    config.prediction_parameterization = (
+        config.prediction_parameterization
+        or getattr(
+            model_config,
+            "diffusion_prediction_parameterization",
+            "same-position",
+        )
+    )
+    config.attention_pattern = (
+        config.attention_pattern
+        or getattr(
+            model_config,
+            "diffusion_attention_pattern",
+            "full-bidirectional",
+        )
+    )
+    config.time_conditioning = (
+        config.time_conditioning
+        or getattr(
+            model_config,
+            "diffusion_time_conditioning",
+            "none",
+        )
+    )
+    config.time_embedding_dim = (
+        config.time_embedding_dim
+        or int(
+            getattr(
+                model_config,
+                "diffusion_time_embedding_dim",
+                256,
+            )
+        )
+    )
+
+
 def train(config: TrainConfig) -> Path:
     """Prepare data, train the converted model, and save a final checkpoint."""
     if config.mode not in {"pretrain", "sft"}:
@@ -679,13 +725,44 @@ def train(config: TrainConfig) -> Path:
         raise ValueError("--push-to-hub requires --hub-model-id.")
     if not config.push_to_hub and (config.hub_model_id or config.hub_private):
         raise ValueError("--hub-model-id and --hub-private require --push-to-hub.")
+    if config.objective == "legacy-mdlm" and (
+        config.mask_sampling == "progressive"
+        or config.condition_dropout
+        or config.mask_tail_augmentation
+        or config.mask_consistency_weight
+        or config.self_conditioning_probability
+    ):
+        raise ValueError(
+            "Progressive masking, condition dropout, tail augmentation, "
+            "consistency, and self-conditioning require a v2 or block objective."
+        )
     set_seed(config.seed)
 
     output_dir = Path(config.output).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    resume_validation = validate_resume_configuration(config, output_dir)
     tokenizer = load_tokenizer(config.model)
     model = load_model(config.model, for_training=True)
+    _resolve_model_architecture(config, model.config)
+    if config.objective == "legacy-mdlm" and (
+        config.mask_sampling == "progressive"
+        or config.condition_dropout
+        or config.mask_tail_augmentation
+        or config.mask_consistency_weight
+        or config.self_conditioning_probability
+    ):
+        raise ValueError(
+            "Progressive masking, condition dropout, tail augmentation, "
+            "consistency, and self-conditioning require a v2 or block objective."
+        )
+    if config.objective == "legacy-mdlm" and (
+        config.prediction_parameterization != "same-position"
+        or config.attention_pattern != "full-bidirectional"
+    ):
+        raise ValueError(
+            "legacy-mdlm requires same-position prediction and full-bidirectional "
+            "attention; choose a v2/block objective for this checkpoint."
+        )
+    resume_validation = validate_resume_configuration(config, output_dir)
     model.config.diffusion_method = "mdlm"
     model.config.mask_token_id = tokenizer.mask_token_id
     model.config.use_cache = False
@@ -693,6 +770,7 @@ def train(config: TrainConfig) -> Path:
         config.prediction_parameterization
     )
     model.config.diffusion_attention_pattern = config.attention_pattern
+    model.config.diffusion_training_objective = config.objective
     model.config.diffusion_time_conditioning = config.time_conditioning
     model.config.diffusion_time_embedding_dim = config.time_embedding_dim
     advanced_training = (

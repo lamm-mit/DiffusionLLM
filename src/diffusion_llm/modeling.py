@@ -1,8 +1,8 @@
 """Bidirectional versions of supported decoder-only Transformers models.
 
-These classes retain the source architecture and parameter names. The only
-substantive change is replacing the decoder's causal mask with a bidirectional,
-padding-aware mask. Run ``python -m diffusion_llm convert --help`` to create a
+These classes retain the source architecture and parameter names while adding
+full or block-causal diffusion attention and optional zero-initialized time
+conditioning. Run ``python -m diffusion_llm convert --help`` to create a
 checkpoint that uses one of these classes.
 """
 

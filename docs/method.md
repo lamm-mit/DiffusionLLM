@@ -16,10 +16,16 @@ p_\theta(x_{0,i}\mid x_t).
 ```
 
 The converter keeps the tokenizer, embeddings, transformer blocks, LM head,
-and pretrained weights. It changes the model configuration and replaces the
-causal mask construction with a bidirectional padding mask. A dedicated mask
-token is added. If this expands the vocabulary, both input embeddings and the
-LM head are resized with mean-based initialization.
+and pretrained weights. A dedicated mask token is added. If this expands the
+vocabulary, both input embeddings and the LM head are resized with mean-based
+initialization. Two attention/prediction parameterizations are supported:
+
+- `same-position` plus `full-bidirectional`: every real query attends to every
+  real key, and logit $i$ reconstructs token $i$;
+- `shifted` plus `block-causal`: completed-prefix representations remain
+  causal, active-block queries see the complete prefix and active block, and
+  raw logit $i-1$ reconstructs token $i$. The final prefix query is extended
+  into the active region so it can predict the block's first token.
 
 The converted model is only an initialization. Its weights were optimized for
 left-to-right prediction and have not yet learned to use future context or to
@@ -47,9 +53,16 @@ x_{0,i} & \text{with probability } \alpha(t),\\
 SFT prompt tokens use label `-100`. They remain clean conditioning context and
 are never selected for corruption or loss. Padding is likewise excluded.
 
-The implementation forces at least one mask in every batch row that has a
-target. This avoids zero-loss examples when $t$ is small or the response is
-short.
+The legacy implementation forces at least one mask in every batch row that has
+a target. This avoids zero-loss examples when $t$ is small or the response is
+short. The v2 engine additionally supports stratified $t$ samples and uniformly
+sampled exact mask counts. Exact counts replace Monte Carlo Bernoulli variance
+with a Rao-Blackwellized masked-token mean.
+
+For block training, one target block is sampled per row. Earlier tokens remain
+visible, the active block receives the sampled corruption, and later target
+blocks become masks. Multiple `train-block-sizes` expose the same checkpoint to
+several inference granularities.
 
 ## 3. Training objective
 
@@ -76,16 +89,56 @@ where $M_t$ contains corrupted target positions and $N$ is the number of
 non-padding target tokens. `--loss-weighting uniform` is available as a useful
 classroom ablation but is not the schedule-weighted MDLM objective.
 
-No right shift is applied: logits at position $i$ predict the clean token at
-position $i$. That is different from causal language modeling.
+The compatibility objective has no right shift. The shifted objective instead
+uses the pretrained AR alignment: raw logit $i-1$ predicts clean token $i$.
+An optional clean-prefix AR loss helps retain the source model's next-token
+skill while block denoising is learned.
+
+### Inference-aligned corruption
+
+Progressive masking approximates intermediate sampler states:
+
+1. fully mask the active target region;
+2. obtain a no-gradient proposal;
+3. measure the proposal probability assigned to every clean target token;
+4. sample one of $K$ reveal phases;
+5. reveal the corresponding number of highest-confidence clean tokens; and
+6. train on the targets that remain masked.
+
+This is a stateless PUMA-inspired rollout, not PUMA's stateful batch-streaming
+implementation. It can be mixed with exact-count states to control compute.
+
+Three other augmentations address train/inference mismatch:
+
+- SFT condition dropout masks or pads the entire prompt on a fraction of rows,
+  supplying the unconditional branch required by classifier-free guidance.
+- Mask-tail augmentation appends unresolved canvas positions beyond the real
+  sequence. A KL consistency term matches target predictions with and without
+  that tail.
+- Draft self-conditioning runs a no-gradient proposal, makes a random subset
+  of proposed tokens visible, retains masked-token loss on the rest, and adds a
+  smaller clean-target correction loss at draft positions.
 
 ## 4. Time and position encoding
 
-Diffusion time is not an input to the network. It controls the sampled mask
-probability and schedule weight in the loss, but there is no learned or
-sinusoidal time embedding and no time-conditioned normalization layer. The
-denoiser sees the corrupted token sequence and can infer its effective noise
-level from the mask pattern.
+By default, diffusion time is not an input to the network. It controls
+corruption and weighting, while the denoiser infers noise from the mask
+pattern. This reproduces the original method and follows the observation that
+an absorbing-mask state already exposes its approximate noise level.
+
+The opt-in additive conditioner uses the actual active-region mask fraction
+$\tilde t=|M|/|T|$. It forms sinusoidal features, applies a two-layer MLP, and
+adds the result to every input embedding:
+
+```math
+h_i^{(0)} = e(x_{t,i}) + \mathrm{MLP}(\mathrm{sinusoid}(\tilde t)).
+```
+
+The MLP's final projection is initialized to zero. A newly enabled conditioner
+therefore changes no logits until training learns a nonzero projection. During
+block generation, $\tilde t$ is recomputed only over the active block. CFG
+conditional and unconditional forwards receive the same value so prompt masks
+do not falsely change diffusion time.
 
 The source model's rotary position embeddings remain unchanged. They encode
 each token's sequence position, not diffusion time.
@@ -141,10 +194,10 @@ With `remask-accept=improve`, the revision forward evaluates both the old and
 new token under the same masked input and retains the old token when it remains
 more probable. Revision counts and cooldowns prevent oscillation.
 
-This is training-free self-correction, but it has a limitation: visible tokens
-were clean ground truth during training and may be wrong during generation.
-Later remasking-aware training can explicitly expose the model to plausible
-wrong visible tokens and learn a correction policy.
+This remains a training-free remasking policy. Draft self-conditioning reduces
+the visible-token mismatch by exposing the denoiser to its own proposals, but
+there is no learned token-quality/remask head. Learning that policy is the next
+deliberately deferred stage.
 
 ### Classifier-free guidance
 
@@ -158,9 +211,9 @@ Optional guidance combines conditional and prompt-masked logits:
 w\left(\ell_\mathrm{conditional}-\ell_\mathrm{unconditional}\right).
 ```
 
-This costs a second model forward per iteration. Current SFT checkpoints did
-not use condition dropout, so guidance strength must be validated rather than
-assumed to help.
+This costs a second model forward per iteration. Legacy checkpoints did not use
+condition dropout. New checkpoints can train with `condition-dropout`, but
+guidance strength must still be validated at matched NFE.
 
 ### EOS and length
 
@@ -189,6 +242,12 @@ autoregressive ordering over blocks.
 
 - AR initialization versus random initialization.
 - Schedule-weighted versus uniform loss.
+- Uniform versus stratified times and Bernoulli versus exact mask counts.
+- Same-position/full attention versus shifted/block-causal training.
+- Canonical versus progressive corruption at matched forward-pass budgets.
+- Implicit versus additive time conditioning.
+- No tail, tail augmentation, and tail consistency.
+- No draft versus draft self-conditioning.
 - Whole-span versus blockwise generation.
 - Probability, margin, entropy, UNCODE, and random commitment.
 - Fixed-count versus confidence-threshold commitment.
@@ -197,6 +256,17 @@ autoregressive ordering over blocks.
 - Number of denoising steps at fixed block size.
 - Full fine-tuning versus LoRA.
 
-Loss alone is insufficient. Compare mask reconstruction accuracy on held-out
-text and manually inspect coherence, repetition, prompt following, and the
-stability of tokens across denoising steps.
+Stochastic training loss alone is insufficient. Use `evaluate-denoising` to
+compare exact fixed corruption patterns, NLL, reconstruction accuracy,
+confidence, and calibration. Then compare end-to-end generation at matched NFE
+and inspect coherence, repetition, prompt following, format adherence, and
+token stability across denoising steps.
+
+The implementation is informed by
+[LLaDA](https://github.com/ML-GSAI/LLaDA),
+[Block Diffusion](https://arxiv.org/abs/2503.09573),
+[Fast-dLLM v2](https://github.com/NVlabs/Fast-dLLM/tree/main/v2),
+[PUMA](https://github.com/JaeyeonKim01/PUMA),
+[Masks Can Be Distracting](https://openreview.net/forum?id=CdJwNTisx1), and
+[self-conditioned masked diffusion](https://arxiv.org/abs/2604.26985). The
+focused implementations here are adaptations, not claims of exact equivalence.

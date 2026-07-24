@@ -25,6 +25,7 @@ def test_conversion_preserves_model_and_adds_mask(
     assert tokenizer.mask_token_id == config.mask_token_id
     assert config.diffusion_prediction_parameterization == "same-position"
     assert config.diffusion_attention_pattern == "full-bidirectional"
+    assert config.diffusion_training_objective == "legacy-mdlm"
     assert model.get_input_embeddings().num_embeddings == len(tokenizer)
     assert (output / "diffusion_metadata.json").exists()
 
@@ -45,6 +46,7 @@ def test_conversion_records_block_shift_architecture(
     config = AutoConfig.from_pretrained(output)
     assert config.diffusion_prediction_parameterization == "shifted"
     assert config.diffusion_attention_pattern == "block-causal"
+    assert config.diffusion_training_objective == "block-hybrid"
 
 
 def test_conversion_can_add_zero_initialized_time_conditioning(

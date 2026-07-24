@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -25,6 +26,7 @@ from diffusion_llm.training import (
     TrainConfig,
     _apply_lora,
     _build_training_arguments,
+    _resolve_model_architecture,
     train,
 )
 
@@ -292,6 +294,31 @@ def test_wandb_tracking_defaults_and_overrides(
     assert os.environ["WANDB_PROJECT"] == "EnvironmentOverride"
 
 
+def test_training_inherits_checkpoint_architecture_by_default(
+    tmp_path: Path,
+) -> None:
+    config = TrainConfig(
+        model="base",
+        dataset="data",
+        output=str(tmp_path),
+    )
+    checkpoint_config = SimpleNamespace(
+        diffusion_training_objective="block-hybrid",
+        diffusion_prediction_parameterization="shifted",
+        diffusion_attention_pattern="block-causal",
+        diffusion_time_conditioning="additive",
+        diffusion_time_embedding_dim=128,
+    )
+
+    _resolve_model_architecture(config, checkpoint_config)
+
+    assert config.objective == "block-hybrid"
+    assert config.prediction_parameterization == "shifted"
+    assert config.attention_pattern == "block-causal"
+    assert config.time_conditioning == "additive"
+    assert config.time_embedding_dim == 128
+
+
 def test_push_to_hub_requires_model_id(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="--hub-model-id"):
         train(
@@ -300,6 +327,21 @@ def test_push_to_hub_requires_model_id(tmp_path: Path) -> None:
                 dataset="unused",
                 output=str(tmp_path),
                 push_to_hub=True,
+            )
+        )
+
+
+def test_advanced_corruption_requires_nonlegacy_objective(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="v2 or block"):
+        train(
+            TrainConfig(
+                model="unused",
+                dataset="unused",
+                output=str(tmp_path),
+                objective="legacy-mdlm",
+                mask_sampling="progressive",
             )
         )
 
