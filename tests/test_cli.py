@@ -303,6 +303,28 @@ def test_train_cli_preserves_legacy_defaults_and_parses_v2_objective() -> None:
     assert block.ar_loss_weight == pytest.approx(0.1)
 
 
+def test_denoising_evaluation_cli_parses_fixed_grid() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "evaluate-denoising",
+            "--model",
+            "checkpoint",
+            "--dataset",
+            "dataset",
+            "--output",
+            "metrics.json",
+            "--mask-probabilities",
+            "0.25,0.75",
+            "--max-batches",
+            "3",
+        ]
+    )
+
+    assert args.mask_probabilities == "0.25,0.75"
+    assert args.max_batches == 3
+    assert args.calibration_bins == 10
+
+
 def test_evaluate_cli_parses_heldout_generation_options() -> None:
     args = cli.build_parser().parse_args(
         [

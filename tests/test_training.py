@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -14,6 +15,10 @@ from transformers import AutoModelForMaskedLM, AutoTokenizer, TrainingArguments
 from diffusion_llm.collator import DiffusionDataCollator
 from diffusion_llm.conversion import convert_checkpoint
 from diffusion_llm.loading import load_model, load_tokenizer
+from diffusion_llm.provenance import (
+    validate_resume_configuration,
+    write_training_config,
+)
 from diffusion_llm.sampling import MaskedDiffusionSampler
 from diffusion_llm.training import (
     MDLMTrainer,
@@ -299,6 +304,39 @@ def test_push_to_hub_requires_model_id(tmp_path: Path) -> None:
         )
 
 
+def test_resume_rejects_training_critical_configuration_drift(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "run"
+    output.mkdir()
+    previous = TrainConfig(
+        model="base",
+        dataset="data",
+        output=str(output),
+        objective="mdlm-v2",
+    )
+    write_training_config(output, previous)
+    current = TrainConfig(
+        model="base",
+        dataset="data",
+        output=str(output),
+        objective="block-mdlm",
+        attention_pattern="block-causal",
+        resume_from_checkpoint=str(output / "checkpoint-10"),
+    )
+
+    with pytest.raises(ValueError, match="training-critical"):
+        validate_resume_configuration(current, output)
+
+    current.allow_resume_mismatch = True
+    validation = validate_resume_configuration(current, output)
+    assert validation["status"] == "mismatch_allowed"
+    assert set(validation["mismatches"]) == {
+        "attention_pattern",
+        "objective",
+    }
+
+
 def test_end_to_end_one_step_training(
     tiny_ar_checkpoint: Path,
     tmp_path: Path,
@@ -334,6 +372,12 @@ def test_end_to_end_one_step_training(
     )
     assert (output / "config.json").exists()
     assert (output / "training_config.json").exists()
+    manifest = json.loads(
+        (output / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["status"] == "completed"
+    assert manifest["global_step"] == 1
+    assert manifest["data"]["train_rows"] > 0
     assert AutoTokenizer.from_pretrained(output).mask_token_id is not None
 
     trained_tokenizer = load_tokenizer(str(output))

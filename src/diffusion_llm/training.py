@@ -5,9 +5,8 @@ Run ``python -m diffusion_llm train --help`` to launch training.
 
 from __future__ import annotations
 
-import json
 import os
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +28,14 @@ from diffusion_llm.corruption import (
 from diffusion_llm.data import load_splits, prepare_pretraining, prepare_sft
 from diffusion_llm.loading import load_model, load_tokenizer
 from diffusion_llm.modeling import configure_time_conditioning
+from diffusion_llm.provenance import (
+    RUN_MANIFEST_NAME,
+    build_run_manifest,
+    finalize_run_manifest,
+    validate_resume_configuration,
+    write_json,
+    write_training_config,
+)
 from diffusion_llm.schedule import loss_weight, mask_probability
 
 
@@ -99,6 +106,7 @@ class TrainConfig:
     wandb_project: str = "DiffusionLLM"
     wandb_entity: str | None = None
     resume_from_checkpoint: str | None = None
+    allow_resume_mismatch: bool = False
     push_to_hub: bool = False
     hub_model_id: str | None = None
     hub_private: bool = False
@@ -675,6 +683,7 @@ def train(config: TrainConfig) -> Path:
 
     output_dir = Path(config.output).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    resume_validation = validate_resume_configuration(config, output_dir)
     tokenizer = load_tokenizer(config.model)
     model = load_model(config.model, for_training=True)
     model.config.diffusion_method = "mdlm"
@@ -781,11 +790,40 @@ def train(config: TrainConfig) -> Path:
         draft_commit_probability=config.draft_commit_probability,
         draft_loss_weight=config.draft_loss_weight,
     )
-    trainer.train(resume_from_checkpoint=config.resume_from_checkpoint)
-    (output_dir / "training_config.json").write_text(
-        json.dumps(asdict(config), indent=2) + "\n",
-        encoding="utf-8",
+    manifest = build_run_manifest(
+        config,
+        model=model,
+        tokenizer=tokenizer,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        resume_validation=resume_validation,
     )
+    if trainer.is_world_process_zero():
+        write_training_config(output_dir, config)
+        write_json(output_dir / RUN_MANIFEST_NAME, manifest)
+    try:
+        trainer.train(resume_from_checkpoint=config.resume_from_checkpoint)
+    except BaseException as error:
+        if trainer.is_world_process_zero():
+            write_json(
+                output_dir / RUN_MANIFEST_NAME,
+                finalize_run_manifest(
+                    manifest,
+                    status="failed",
+                    global_step=trainer.state.global_step,
+                    error=f"{type(error).__name__}: {error}",
+                ),
+            )
+        raise
     tokenizer.save_pretrained(output_dir)
     trainer.save_model(str(output_dir))
+    if trainer.is_world_process_zero():
+        write_json(
+            output_dir / RUN_MANIFEST_NAME,
+            finalize_run_manifest(
+                manifest,
+                status="completed",
+                global_step=trainer.state.global_step,
+            ),
+        )
     return output_dir

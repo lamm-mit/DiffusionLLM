@@ -20,6 +20,10 @@ import transformers
 
 from diffusion_llm import __version__
 from diffusion_llm.conversion import convert_checkpoint
+from diffusion_llm.denoising_evaluation import (
+    DenoisingEvalConfig,
+    evaluate_denoising_checkpoint,
+)
 from diffusion_llm.evaluation import GenerationEvalConfig, evaluate_checkpoint
 from diffusion_llm.loading import choose_device, load_model, load_tokenizer
 from diffusion_llm.mixture import (
@@ -359,6 +363,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train_parser.add_argument("--resume-from-checkpoint")
     train_parser.add_argument(
+        "--allow-resume-mismatch",
+        action="store_true",
+        help="Override safety checks for training-critical resume configuration drift.",
+    )
+    train_parser.add_argument(
         "--push-to-hub",
         action="store_true",
         help="Upload saved and final models to the Hugging Face Hub.",
@@ -520,6 +529,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evaluate.add_argument("--overwrite", action="store_true")
     evaluate.set_defaults(handler=_run_evaluate)
+
+    denoising = commands.add_parser(
+        "evaluate-denoising",
+        help="Measure deterministic denoising quality at fixed corruption levels.",
+    )
+    denoising.add_argument("--model", required=True)
+    denoising.add_argument("--dataset", required=True)
+    denoising.add_argument("--dataset-config")
+    denoising.add_argument("--split", default="validation")
+    denoising.add_argument("--mode", choices=("pretrain", "sft"), default="sft")
+    denoising.add_argument("--text-field", default="text")
+    denoising.add_argument("--max-length", type=int, default=1024)
+    denoising.add_argument(
+        "--append-eos",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    denoising.add_argument(
+        "--mask-prompt-loss",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    denoising.add_argument("--num-samples", type=int, default=512)
+    denoising.add_argument("--batch-size", type=int, default=4)
+    denoising.add_argument("--max-batches", type=int)
+    denoising.add_argument(
+        "--mask-probabilities",
+        default="0.15,0.30,0.50,0.70,0.90",
+    )
+    denoising.add_argument("--block-size", type=int, default=32)
+    denoising.add_argument("--calibration-bins", type=int, default=10)
+    denoising.add_argument("--num-proc", type=int, default=1)
+    denoising.add_argument("--device", default="auto")
+    denoising.add_argument(
+        "--dtype",
+        choices=("auto", "float32", "float16", "bfloat16"),
+        default="auto",
+    )
+    denoising.add_argument("--seed", type=int, default=1729)
+    denoising.add_argument("--output", required=True)
+    denoising.add_argument("--overwrite", action="store_true")
+    denoising.set_defaults(handler=_run_evaluate_denoising)
 
     chat = commands.add_parser("chat", help="Start an interactive diffusion chat.")
     _add_inference_arguments(chat)
@@ -763,6 +814,23 @@ def _run_evaluate(args: argparse.Namespace) -> None:
             f"{int(sampler_totals.get('tokens_remasked', 0))} remasks, "
             f"{int(sampler_totals.get('tokens_revised', 0))} revisions"
         )
+
+
+def _run_evaluate_denoising(args: argparse.Namespace) -> None:
+    values = vars(args).copy()
+    values.pop("command")
+    values.pop("handler")
+    output, payload = evaluate_denoising_checkpoint(
+        DenoisingEvalConfig(**values)
+    )
+    aggregate = payload["metrics"]["aggregate"]
+    print(f"Denoising metrics: {output}")
+    print(
+        f"Tokens: {aggregate['tokens']} | "
+        f"NLL: {aggregate['nll']:.4f} | "
+        f"accuracy: {aggregate['accuracy']:.1%} | "
+        f"confidence: {aggregate['mean_confidence']:.1%}"
+    )
 
 
 def _run_chat(args: argparse.Namespace) -> None:
