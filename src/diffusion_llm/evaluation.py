@@ -20,6 +20,7 @@ from diffusion_llm.data import (
 )
 from diffusion_llm.loading import load_model, load_tokenizer
 from diffusion_llm.sampling import MaskedDiffusionSampler, decode_generations
+from diffusion_llm.tokenization import token_id_list
 
 
 @dataclass
@@ -36,13 +37,46 @@ class GenerationEvalConfig:
     max_total_tokens: int | None = None
     max_new_tokens: int = 64
     steps: int = 64
+    max_nfe: int | None = None
     block_size: int = 32
     temperature: float = 0.0
-    remasking: str = "low_confidence"
+    top_k: int = 0
+    top_p: float = 1.0
+    sampling_method: str = "multinomial"
+    sampling_precision: str = "float64"
+    sampling_chunk_size: int = 64
+    commit_policy: str = "max-prob"
+    commit_schedule: str = "fixed"
+    confidence_threshold: float = 0.9
+    min_commit: int = 1
+    max_commit: int | None = None
+    uncode_base_policy: str = "max-prob"
+    uncode_position_lambda: float = 1.0
+    uncode_information_alpha: float = 10.0
+    uncode_trivial_penalty: float = 0.35
+    token_frequency_file: str | None = None
+    cfg_scale: float = 0.0
+    cfg_unconditional: str = "mask"
+    negative_prompt: str | None = None
+    remask_policy: str = "none"
+    remask_rate: float = 0.05
+    remask_start_fraction: float = 0.5
+    max_remasks_per_step: int = 4
+    max_revisions_per_token: int = 2
+    remask_window: str = "current"
+    remask_cooldown: int = 1
+    remask_candidate_pool: int = 16
+    remask_accept: str = "improve"
+    remask_eos: bool = False
+    min_new_tokens: int = 0
+    eos_stability_steps: int = 1
+    stop_on_eos: bool = True
+    remasking: str | None = None
     device: str = "auto"
     dtype: str = "auto"
     seed: int = 42
     progress: bool = True
+    sampling_stats: bool = True
     source_field: str = "source"
     summary_output: str | None = None
     overwrite: bool = False
@@ -209,21 +243,67 @@ def evaluate_checkpoint(config: GenerationEvalConfig) -> tuple[Path, Path, dict[
     sampler = MaskedDiffusionSampler(model, tokenizer)
     torch.manual_seed(config.seed)
     records: list[dict[str, Any]] = []
+    sampler_totals = Counter()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as handle:
         for start in range(0, len(examples), config.batch_size):
             batch = examples[start : start + config.batch_size]
+            negative_prompts = None
+            if config.negative_prompt is not None:
+                negative_ids = token_id_list(
+                    tokenizer.encode(
+                        config.negative_prompt,
+                        add_special_tokens=True,
+                    )
+                )
+                negative_prompts = [negative_ids.copy() for _ in batch]
             sampled = sampler.sample(
                 [example.prompt_ids for example in batch],
                 max_new_tokens=config.max_new_tokens,
                 steps=config.steps,
+                max_nfe=config.max_nfe,
                 block_size=config.block_size,
                 temperature=config.temperature,
+                top_k=config.top_k,
+                top_p=config.top_p,
+                sampling_method=config.sampling_method,
+                sampling_precision=config.sampling_precision,
+                sampling_chunk_size=config.sampling_chunk_size,
+                commit_policy=config.commit_policy,
+                commit_schedule=config.commit_schedule,
+                confidence_threshold=config.confidence_threshold,
+                min_commit=config.min_commit,
+                max_commit=config.max_commit,
+                uncode_base_policy=config.uncode_base_policy,
+                uncode_position_lambda=config.uncode_position_lambda,
+                uncode_information_alpha=config.uncode_information_alpha,
+                uncode_trivial_penalty=config.uncode_trivial_penalty,
+                token_frequency_file=config.token_frequency_file,
+                cfg_scale=config.cfg_scale,
+                cfg_unconditional=config.cfg_unconditional,
+                negative_prompts=negative_prompts,
+                remask_policy=config.remask_policy,
+                remask_rate=config.remask_rate,
+                remask_start_fraction=config.remask_start_fraction,
+                max_remasks_per_step=config.max_remasks_per_step,
+                max_revisions_per_token=config.max_revisions_per_token,
+                remask_window=config.remask_window,
+                remask_cooldown=config.remask_cooldown,
+                remask_candidate_pool=config.remask_candidate_pool,
+                remask_accept=config.remask_accept,
+                remask_eos=config.remask_eos,
+                min_new_tokens=config.min_new_tokens,
+                eos_stability_steps=config.eos_stability_steps,
+                stop_on_eos=config.stop_on_eos,
                 remasking=config.remasking,
                 return_history=False,
                 show_progress=config.progress,
             )
+            if sampled.stats:
+                for key, value in sampled.stats.to_dict().items():
+                    if key != "committed_tokens_per_forward":
+                        sampler_totals[key] += value
             generations = decode_generations(tokenizer, sampled)
             for example, generation in zip(batch, generations, strict=True):
                 normalized_generation = generation.strip()
@@ -244,6 +324,7 @@ def evaluate_checkpoint(config: GenerationEvalConfig) -> tuple[Path, Path, dict[
                         generation,
                         example.reference,
                     ),
+                    "batch_sampler": sampled.stats.to_dict() if sampled.stats else None,
                 }
                 records.append(record)
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -259,8 +340,17 @@ def evaluate_checkpoint(config: GenerationEvalConfig) -> tuple[Path, Path, dict[
         "generation": {
             "max_new_tokens": config.max_new_tokens,
             "steps": config.steps,
+            "max_nfe": config.max_nfe,
             "block_size": config.block_size,
             "temperature": config.temperature,
+            "top_k": config.top_k,
+            "top_p": config.top_p,
+            "sampling_method": config.sampling_method,
+            "sampling_precision": config.sampling_precision,
+            "commit_policy": config.commit_policy,
+            "commit_schedule": config.commit_schedule,
+            "remask_policy": config.remask_policy,
+            "cfg_scale": config.cfg_scale,
             "remasking": config.remasking,
             "max_total_tokens": config.max_total_tokens,
         },
@@ -274,6 +364,7 @@ def evaluate_checkpoint(config: GenerationEvalConfig) -> tuple[Path, Path, dict[
             "mean_generated_tokens": mean(record["generated_tokens"] for record in records),
         },
         "by_source": _source_summaries(records),
+        "sampler_totals": dict(sampler_totals),
         "metric_note": (
             "Lexical token F1 measures surface overlap only. For open-ended chat, "
             "inspect generations or use a blinded human/LLM judge."

@@ -290,3 +290,67 @@ def test_inference_progress_is_on_by_default_and_can_be_disabled() -> None:
     assert not disabled.progress
     assert cli._sample_kwargs(defaults)["show_progress"]
     assert not cli._sample_kwargs(disabled)["show_progress"]
+
+
+def test_generate_cli_parses_advanced_sampler_options() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "generate",
+            "--model",
+            "model",
+            "--prompt",
+            "Prompt:",
+            "--max-new-tokens",
+            "512",
+            "--steps",
+            "768",
+            "--max-nfe",
+            "900",
+            "--block-size",
+            "16",
+            "--temperature",
+            "0.2",
+            "--top-p",
+            "0.95",
+            "--sampling-method",
+            "multinomial",
+            "--sampling-precision",
+            "float64",
+            "--commit-policy",
+            "uncode",
+            "--commit-schedule",
+            "threshold",
+            "--confidence-threshold",
+            "0.9",
+            "--max-commit",
+            "8",
+            "--cfg-scale",
+            "0.5",
+            "--remask-policy",
+            "rescore",
+            "--remask-rate",
+            "0.05",
+            "--max-remasks-per-step",
+            "2",
+            "--remask-window",
+            "previous",
+            "--min-new-tokens",
+            "32",
+            "--eos-stability-steps",
+            "2",
+            "--gif",
+            "trajectory.gif",
+            "--gif-max-frames",
+            "80",
+        ]
+    )
+
+    values = cli._sample_kwargs(args)
+    assert values["max_nfe"] == 900
+    assert values["commit_policy"] == "uncode"
+    assert values["commit_schedule"] == "threshold"
+    assert values["cfg_scale"] == pytest.approx(0.5)
+    assert values["remask_policy"] == "rescore"
+    assert values["remask_window"] == "previous"
+    assert values["eos_stability_steps"] == 2
+    assert args.gif_max_frames == 80

@@ -219,14 +219,143 @@ in gold, and older committed text becomes white. A small progress bar and step
 counter show the trajectory. The initial and final frames pause automatically.
 
 Generation and interactive chat show a terminal `tqdm` bar over the actual
-denoising forward passes by default. Pass `--no-progress` for quiet scripts or
-logs. The bar is written to stderr, so `generate --json` keeps stdout
-machine-readable.
+model forward evaluations by default. A second stderr line reports NFE,
+commitments, remasks, revisions, and elapsed time. Pass `--no-progress` and
+`--no-sampling-stats` for quiet scripts or logs. Both are written to stderr, so
+`generate --json` keeps stdout machine-readable.
 
 For the clearest parallel-denoising demonstration, make `--block-size` equal to
 `--max-new-tokens`. GIF history is collected only when `--gif` is supplied.
-The renderer is tested with a long prompt and a 128-token result; the canvas
-grows with wrapped output up to 24 result lines.
+The renderer is tested with long prompts and results, displays remask/revision
+events and their NFE, and downsamples long trajectories to
+`--gif-max-frames 120` by default. Increase `--gif-max-result-lines` when a
+long response should remain visible without truncation.
+
+## Improved sampling and genuine remasking
+
+All sampler improvements work with existing DiffusionLLM checkpoints; no
+retraining or checkpoint conversion is required. The default sampler now uses
+chunked float64 multinomial sampling for nonzero temperatures rather than
+truncated float32 Gumbel noise. Use `--sampling-precision float32` if lower
+sampling memory matters more than the additional precision.
+
+The following command uses nucleus sampling, entropy-based confidence, and a
+dynamic confidence threshold. It commits several unambiguous tokens per
+forward while automatically falling back to the number needed to finish:
+
+```bash
+MODEL=artifacts/qwen2.5-1.5b-diffusion-chatmix-1024-2m-from-base/checkpoint-4400
+
+uv run --no-sync diffusion-llm generate \
+  --model "$MODEL" \
+  --prompt "Explain why salt stress can reduce plant growth." \
+  --chat-template \
+  --max-new-tokens 256 \
+  --steps 256 \
+  --block-size 16 \
+  --temperature 0.2 \
+  --top-p 0.95 \
+  --commit-policy entropy \
+  --commit-schedule threshold \
+  --confidence-threshold 0.9 \
+  --max-commit 8 \
+  --device cuda:0
+```
+
+`--commit-policy uncode` adds position-aware and token-information calibration
+to reduce boundary-first decoding and premature commitment of punctuation,
+whitespace, and structural tokens:
+
+```bash
+uv run --no-sync diffusion-llm generate \
+  --model "$MODEL" \
+  --prompt "Develop three mechanistic hypotheses for the observed result." \
+  --chat-template \
+  --max-new-tokens 512 \
+  --steps 512 \
+  --block-size 16 \
+  --temperature 0.2 \
+  --top-p 0.95 \
+  --commit-policy uncode \
+  --uncode-base-policy max-prob \
+  --uncode-position-lambda 0.5 \
+  --uncode-trivial-penalty 0.25 \
+  --device cuda:0
+```
+
+Without `--token-frequency-file`, UNCODE uses a tokenizer-aware structural
+penalty for whitespace and punctuation. For corpus-derived self-information,
+pass a JSON object mapping token IDs to counts or probabilities:
+
+```json
+{"0": 1000, "1": 850, "2": 4}
+```
+
+Training-free remasking returns low-confidence committed response tokens to
+the mask state and predicts them again using newer bidirectional context:
+
+```bash
+uv run --no-sync diffusion-llm generate \
+  --model "$MODEL" \
+  --prompt "Compare two competing explanations and select the stronger one." \
+  --chat-template \
+  --max-new-tokens 512 \
+  --steps 768 \
+  --max-nfe 768 \
+  --block-size 16 \
+  --temperature 0.2 \
+  --top-p 0.95 \
+  --commit-policy uncode \
+  --commit-schedule threshold \
+  --confidence-threshold 0.9 \
+  --max-commit 8 \
+  --remask-policy confidence \
+  --remask-rate 0.05 \
+  --remask-start-fraction 0.5 \
+  --max-remasks-per-step 2 \
+  --max-revisions-per-token 2 \
+  --remask-window previous \
+  --remask-accept improve \
+  --gif artifacts/remasking-denoising.gif \
+  --gif-frame-duration-ms 100 \
+  --device cuda:0
+```
+
+Unlike the former `--remasking low_confidence` name—which only selected which
+masked positions to commit—`--remask-policy` performs actual reversible
+sampling. System and user prompt tokens are immutable. `confidence` uses the
+stored probability from the commitment step; `rescore` masks a small candidate
+pool and spends an additional forward pass to reassess the old tokens under
+the current context; `random` is an ablation. `--remask-accept improve` keeps
+the old token unless its replacement has at least as much probability under
+the same masked context.
+
+Classifier-free guidance is also available:
+
+```bash
+uv run --no-sync diffusion-llm generate \
+  --model "$MODEL" \
+  --system-prompt "Follow the requested scientific format exactly." \
+  --prompt "Explain the result mechanistically." \
+  --chat-template \
+  --max-new-tokens 256 \
+  --steps 256 \
+  --block-size 16 \
+  --cfg-scale 0.5 \
+  --device cuda:0
+```
+
+CFG performs an additional unconditional forward per iteration and therefore
+approximately doubles NFE. Existing checkpoints were not trained with prompt
+dropout, so compare `--cfg-scale 0`, `0.5`, `1.0`, and `1.5` on held-out data
+before making guidance a default.
+
+EOS remains provisional while it is masked. `--min-new-tokens` prevents EOS
+before a chosen position and `--eos-stability-steps` requires repeated EOS
+predictions before confidence-based commitment. Once every earlier position is
+resolved, stable EOS safely ends the response and skips its unused canvas.
+Pass `--no-stop-on-eos` for fixed-canvas experiments. EOS remasking is
+available with `--remask-eos`, but disables safe early stopping.
 
 ## Substantial training recipe
 
@@ -352,14 +481,16 @@ This preserves system messages and multi-turn context. The same chat formatting
 path is used by SFT preprocessing and evaluation.
 
 The detailed JSONL stores prompts, references, generations, token counts,
-source labels, exact match, and lexical token F1. A sibling
+source labels, exact match, lexical token F1, and per-batch sampler statistics.
+A sibling
 `checkpoint-4400-heldout.summary.json` contains aggregate and per-source
-statistics plus counts of unsupported or over-length rows. Pass
+statistics, total NFE/remasks/revisions, and counts of unsupported or
+over-length rows. Pass
 `--summary-output PATH` to choose another summary location or `--overwrite` to
 replace existing results.
 
 For checkpoint comparisons, keep the dataset, split, seed, length settings,
-and decoding settings fixed. `--temperature 0` makes low-confidence decoding
+and decoding settings fixed. `--temperature 0` makes token selection
 deterministic. Lexical F1 measures surface overlap only; open-ended chat quality
 should be assessed by inspecting the saved generations or with a blinded human
 or LLM judge.
@@ -590,14 +721,17 @@ token position in the sequence, not diffusion time.
 Generation starts with a fixed canvas of masks. At every step the network:
 
 1. predicts all currently unresolved positions in one bidirectional pass;
-2. excludes the mask and padding tokens as output candidates;
-3. ranks predictions by confidence; and
-4. permanently commits a scheduled number of tokens.
+2. excludes invalid special tokens and applies optional top-k/top-p filtering;
+3. ranks predictions by probability, margin, entropy, position, or calibrated
+   UNCODE score;
+4. commits a fixed or confidence-thresholded subset; and
+5. optionally returns low-confidence committed response tokens to `[MASK]` for
+   another prediction under newer context.
 
 The process repeats until no masks remain. With
 `block-size < max-new-tokens`, blocks are completed from left to right.
-`--remasking random` replaces confidence ranking with random selection as an
-ablation.
+Remasking may be restricted to the current block, current plus previous block,
+or all completed response blocks. Prompt tokens are never eligible.
 
 This is iterative absorbing-mask denoising. It is not Gaussian diffusion, does
 not use a learned time embedding, and is not an exact ancestral sampler for a
@@ -630,8 +764,12 @@ uv run diffusion-llm generate --help
 - smaller blocks: semi-autoregressive, block-by-block generation; and
 - `block-size == 1`: an expensive AR-like limiting case.
 
-`steps` is a total budget divided across blocks. Every mask is guaranteed to
-resolve even when there are fewer steps than output tokens.
+`steps` is an iteration budget divided across blocks. Without true remasking,
+generation may finish before that budget after every mask is committed. With
+`--remask-policy`, surplus iterations perform revision. `--max-nfe` is a hard
+budget over actual model forwards and includes CFG and rescore probes. Every
+unfinished block is guaranteed to resolve or the CLI exits with a clear budget
+error rather than silently returning masks.
 
 ## Verification
 

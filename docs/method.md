@@ -102,13 +102,73 @@ At every denoising step:
 
 1. run one bidirectional forward pass;
 2. predict a token for every unresolved mask;
-3. suppress the mask and padding tokens as output candidates;
-4. score predictions by model confidence (or randomly for an ablation);
-5. commit the scheduled highest-confidence subset; and
-6. leave low-confidence positions masked for another prediction.
+3. suppress invalid special tokens and apply optional top-k/top-p filtering;
+4. sample categorically with multinomial or Gumbel-max sampling;
+5. score predictions by probability, top-two margin, normalized entropy,
+   left-to-right position, random order, or UNCODE calibration;
+6. commit a fixed-count or confidence-thresholded subset; and
+7. optionally remask low-confidence committed response tokens and predict them
+   again using newer bidirectional context.
 
 The deterministic reveal allocator divides the remaining masks across the
-remaining steps and guarantees that every mask is filled.
+remaining iterations and guarantees that every mask is filled. A threshold
+schedule may commit more tokens when the model is confident, but always falls
+back to the number needed to finish within its block budget.
+
+### Categorical sampling
+
+The default non-greedy sampler uses chunked float64 multinomial sampling.
+Chunking avoids materializing float64 probabilities or Gumbel noise for every
+position in a long output simultaneously. Float32, Gumbel-max, top-k, and
+nucleus sampling remain explicit ablations.
+
+### Genuine remasking
+
+The model was trained to reconstruct arbitrary masked subsets of the assistant
+response while preserving the prompt. Consequently, an inference sampler can
+turn a committed response token back into `[MASK]` and ask the same checkpoint
+to reconstruct it under newer context. Prompt and system positions are never
+eligible.
+
+Two confidence sources are supported:
+
+- `confidence` remembers the candidate probability at commitment time;
+- `rescore` selects a low-confidence candidate pool, masks that pool in a
+  probe pass, and measures the probability of each old token under the current
+  context.
+
+With `remask-accept=improve`, the revision forward evaluates both the old and
+new token under the same masked input and retains the old token when it remains
+more probable. Revision counts and cooldowns prevent oscillation.
+
+This is training-free self-correction, but it has a limitation: visible tokens
+were clean ground truth during training and may be wrong during generation.
+Later remasking-aware training can explicitly expose the model to plausible
+wrong visible tokens and learn a correction policy.
+
+### Classifier-free guidance
+
+Optional guidance combines conditional and prompt-masked logits:
+
+```math
+\ell_\mathrm{guided}
+=
+\ell_\mathrm{conditional}
++
+w\left(\ell_\mathrm{conditional}-\ell_\mathrm{unconditional}\right).
+```
+
+This costs a second model forward per iteration. Current SFT checkpoints did
+not use condition dropout, so guidance strength must be validated rather than
+assumed to help.
+
+### EOS and length
+
+EOS may be prevented before `min-new-tokens` and may require repeated
+predictions at the same unresolved position. Once EOS is committed and every
+earlier response position is resolved, later canvas positions are padded and
+skipped. EOS can be made remaskable for research experiments, but doing so
+disables safe early termination.
 
 ## 6. Blockwise generation
 
@@ -130,7 +190,10 @@ autoregressive ordering over blocks.
 - AR initialization versus random initialization.
 - Schedule-weighted versus uniform loss.
 - Whole-span versus blockwise generation.
-- Confidence versus random remasking.
+- Probability, margin, entropy, UNCODE, and random commitment.
+- Fixed-count versus confidence-threshold commitment.
+- No remasking versus stored-confidence and rescore remasking.
+- CFG strength at matched NFE.
 - Number of denoising steps at fixed block size.
 - Full fine-tuning versus LoRA.
 

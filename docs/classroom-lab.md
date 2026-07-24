@@ -90,13 +90,45 @@ diffusion-llm generate \
   --block-size 16
 ```
 
+Adaptive parallel commitment:
+
+```bash
+diffusion-llm generate \
+  --model artifacts/shakespeare-100 \
+  --prompt "First Citizen:" \
+  --max-new-tokens 64 \
+  --steps 64 \
+  --block-size 16 \
+  --commit-policy entropy \
+  --commit-schedule threshold \
+  --confidence-threshold 0.9 \
+  --max-commit 8
+```
+
+Training-free revision:
+
+```bash
+diffusion-llm generate \
+  --model artifacts/shakespeare-100 \
+  --prompt "First Citizen:" \
+  --max-new-tokens 64 \
+  --steps 96 \
+  --max-nfe 96 \
+  --block-size 16 \
+  --remask-policy confidence \
+  --max-remasks-per-step 2 \
+  --max-revisions-per-token 2 \
+  --remask-window previous
+```
+
 Record:
 
-| Run | Steps | Block size | Wall time | Repetition | Local coherence |
-|---|---:|---:|---:|---:|---:|
-| A | 64 | 64 | | | |
-| B | 64 | 16 | | | |
-| C | 16 | 16 | | | |
+| Run | Steps | NFE | Block size | Remasks | Revisions | Wall time | Coherence |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A | 64 | | 64 | 0 | 0 | | |
+| B | 64 | | 16 | 0 | 0 | | |
+| C | 16 | | 16 | 0 | 0 | | |
+| D | 96 | | 16 | | | | |
 
 ## Part 5: inspect the objective
 

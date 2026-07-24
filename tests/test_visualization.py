@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 from PIL import Image
 
-from diffusion_llm.sampling import SamplerOutput
+from diffusion_llm.sampling import SamplerOutput, TrajectoryEvent
 from diffusion_llm.visualization import save_denoising_gif
 
 
@@ -81,3 +81,38 @@ def test_long_prompt_and_128_token_result_fit_canvas(tmp_path: Path) -> None:
         assert image.n_frames == len(histories)
         assert image.width == 1280
         assert image.height <= 1200
+
+
+def test_long_revision_history_is_downsampled(tmp_path: Path) -> None:
+    histories = []
+    events = []
+    for index in range(40):
+        generated = [4] * min(index, 8) + [9] * max(0, 8 - index)
+        histories.append(torch.tensor([[2, 3, *generated]]))
+        events.append(
+            TrajectoryEvent(
+                kind="remask" if index == 20 else "commit",
+                iteration=index,
+                forward_evaluations=index,
+                block_index=0,
+                remasked=1 if index == 20 else 0,
+            )
+        )
+    output = SamplerOutput(
+        sequences=histories[-1],
+        prompt_lengths=[2],
+        histories=histories,
+        events=events,
+    )
+    path = save_denoising_gif(
+        ToyTokenizer(),
+        output,
+        tmp_path / "downsampled.gif",
+        prompt="Hello world",
+        frame_duration_ms=40,
+        max_frames=10,
+        text_columns=24,
+    )
+
+    with Image.open(path) as image:
+        assert image.n_frames <= 10

@@ -28,13 +28,24 @@ from diffusion_llm.mixture import (
     upload_saved_mixture,
 )
 from diffusion_llm.sampling import MaskedDiffusionSampler, decode_generations, encode_prompt
+from diffusion_llm.tokenization import token_id_list
 from diffusion_llm.training import TrainConfig, train
 
 
 def _add_inference_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", required=True, help="Diffusion checkpoint or LoRA adapter.")
     parser.add_argument("--max-new-tokens", type=int, default=64)
-    parser.add_argument("--steps", type=int, default=64, help="Total denoising-step budget.")
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=64,
+        help="Denoising-iteration budget; extra iterations enable revision when remasking.",
+    )
+    parser.add_argument(
+        "--max-nfe",
+        type=int,
+        help="Optional hard budget on model forward evaluations, including CFG and rescoring.",
+    )
     parser.add_argument(
         "--block-size",
         type=int,
@@ -42,10 +53,104 @@ def _add_inference_arguments(parser: argparse.ArgumentParser) -> None:
         help="Tokens generated together; use max-new-tokens for pure diffusion.",
     )
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--top-k", type=int, default=0, help="0 disables top-k filtering.")
+    parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument(
+        "--sampling-method",
+        choices=("multinomial", "gumbel"),
+        default="multinomial",
+        help="Categorical sampler; multinomial avoids full-vocabulary Gumbel noise.",
+    )
+    parser.add_argument(
+        "--sampling-precision",
+        choices=("float32", "float64"),
+        default="float64",
+        help="Precision used for categorical sampling.",
+    )
+    parser.add_argument(
+        "--sampling-chunk-size",
+        type=int,
+        default=64,
+        help="Positions sampled together; reduce this to lower peak memory.",
+    )
+    commitment = parser.add_argument_group("token commitment")
+    commitment.add_argument(
+        "--commit-policy",
+        choices=("max-prob", "margin", "entropy", "random", "left-to-right", "uncode"),
+        default="max-prob",
+    )
+    commitment.add_argument(
+        "--commit-schedule",
+        choices=("fixed", "threshold"),
+        default="fixed",
+    )
+    commitment.add_argument("--confidence-threshold", type=float, default=0.9)
+    commitment.add_argument("--min-commit", type=int, default=1)
+    commitment.add_argument("--max-commit", type=int)
+    commitment.add_argument(
         "--remasking",
         choices=("low_confidence", "random"),
-        default="low_confidence",
+        help=argparse.SUPPRESS,
+    )
+    uncode = parser.add_argument_group("UNCODE calibration")
+    uncode.add_argument(
+        "--uncode-base-policy",
+        choices=("max-prob", "margin", "entropy"),
+        default="max-prob",
+    )
+    uncode.add_argument("--uncode-position-lambda", type=float, default=1.0)
+    uncode.add_argument("--uncode-information-alpha", type=float, default=10.0)
+    uncode.add_argument("--uncode-trivial-penalty", type=float, default=0.35)
+    uncode.add_argument(
+        "--token-frequency-file",
+        help="Optional JSON token-frequency object/list for UNCODE self-information.",
+    )
+    guidance = parser.add_argument_group("classifier-free guidance")
+    guidance.add_argument("--cfg-scale", type=float, default=0.0)
+    guidance.add_argument(
+        "--cfg-unconditional",
+        choices=("mask", "pad"),
+        default="mask",
+    )
+    guidance.add_argument(
+        "--negative-prompt",
+        help="Optional raw negative condition placed in the unconditional prompt span.",
+    )
+    revision = parser.add_argument_group("training-free remasking")
+    revision.add_argument(
+        "--remask-policy",
+        choices=("none", "confidence", "rescore", "random"),
+        default="none",
+    )
+    revision.add_argument("--remask-rate", type=float, default=0.05)
+    revision.add_argument("--remask-start-fraction", type=float, default=0.5)
+    revision.add_argument("--max-remasks-per-step", type=int, default=4)
+    revision.add_argument("--max-revisions-per-token", type=int, default=2)
+    revision.add_argument(
+        "--remask-window",
+        choices=("current", "previous", "global"),
+        default="current",
+    )
+    revision.add_argument("--remask-cooldown", type=int, default=1)
+    revision.add_argument("--remask-candidate-pool", type=int, default=16)
+    revision.add_argument(
+        "--remask-accept",
+        choices=("always", "improve"),
+        default="improve",
+    )
+    revision.add_argument(
+        "--remask-eos",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Permit EOS revision; this disables safe early stopping.",
+    )
+    length = parser.add_argument_group("length and EOS")
+    length.add_argument("--min-new-tokens", type=int, default=0)
+    length.add_argument("--eos-stability-steps", type=int, default=1)
+    length.add_argument(
+        "--stop-on-eos",
+        action=argparse.BooleanOptionalAction,
+        default=True,
     )
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, cuda:0, or mps.")
     parser.add_argument(
@@ -59,6 +164,12 @@ def _add_inference_arguments(parser: argparse.ArgumentParser) -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Show denoising progress (disable with --no-progress).",
+    )
+    parser.add_argument(
+        "--sampling-stats",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Report NFE, commitments, remasks, revisions, and elapsed time to stderr.",
     )
 
 
@@ -286,6 +397,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=220,
         help="Duration of intermediate GIF frames in milliseconds.",
     )
+    generate.add_argument(
+        "--gif-max-frames",
+        type=int,
+        default=120,
+        help="Downsample long trajectories while retaining remask/revision frames.",
+    )
+    generate.add_argument("--gif-text-columns", type=int, default=92)
+    generate.add_argument("--gif-max-prompt-lines", type=int, default=8)
+    generate.add_argument("--gif-max-result-lines", type=int, default=32)
     generate.add_argument("--json", action="store_true", help="Emit a machine-readable result.")
     generate.set_defaults(handler=_run_generate)
 
@@ -405,15 +525,59 @@ def _sampler_from_args(args: argparse.Namespace):
     return tokenizer, MaskedDiffusionSampler(model, tokenizer)
 
 
-def _sample_kwargs(args: argparse.Namespace) -> dict[str, object]:
-    return {
+def _sample_kwargs(
+    args: argparse.Namespace,
+    tokenizer=None,
+    *,
+    batch_size: int = 1,
+) -> dict[str, object]:
+    values: dict[str, object] = {
         "max_new_tokens": args.max_new_tokens,
         "steps": args.steps,
+        "max_nfe": args.max_nfe,
         "block_size": args.block_size,
         "temperature": args.temperature,
+        "top_k": args.top_k,
+        "top_p": args.top_p,
+        "sampling_method": args.sampling_method,
+        "sampling_precision": args.sampling_precision,
+        "sampling_chunk_size": args.sampling_chunk_size,
+        "commit_policy": args.commit_policy,
+        "commit_schedule": args.commit_schedule,
+        "confidence_threshold": args.confidence_threshold,
+        "min_commit": args.min_commit,
+        "max_commit": args.max_commit,
+        "uncode_base_policy": args.uncode_base_policy,
+        "uncode_position_lambda": args.uncode_position_lambda,
+        "uncode_information_alpha": args.uncode_information_alpha,
+        "uncode_trivial_penalty": args.uncode_trivial_penalty,
+        "token_frequency_file": args.token_frequency_file,
+        "cfg_scale": args.cfg_scale,
+        "cfg_unconditional": args.cfg_unconditional,
+        "remask_policy": args.remask_policy,
+        "remask_rate": args.remask_rate,
+        "remask_start_fraction": args.remask_start_fraction,
+        "max_remasks_per_step": args.max_remasks_per_step,
+        "max_revisions_per_token": args.max_revisions_per_token,
+        "remask_window": args.remask_window,
+        "remask_cooldown": args.remask_cooldown,
+        "remask_candidate_pool": args.remask_candidate_pool,
+        "remask_accept": args.remask_accept,
+        "remask_eos": args.remask_eos,
+        "min_new_tokens": args.min_new_tokens,
+        "eos_stability_steps": args.eos_stability_steps,
+        "stop_on_eos": args.stop_on_eos,
         "remasking": args.remasking,
         "show_progress": args.progress,
     }
+    if args.negative_prompt is not None:
+        if tokenizer is None:
+            raise ValueError("A tokenizer is required to encode --negative-prompt.")
+        negative_ids = token_id_list(
+            tokenizer.encode(args.negative_prompt, add_special_tokens=True)
+        )
+        values["negative_prompts"] = [negative_ids.copy() for _ in range(batch_size)]
+    return values
 
 
 def _run_generate(args: argparse.Namespace) -> None:
@@ -435,9 +599,19 @@ def _run_generate(args: argparse.Namespace) -> None:
     output = sampler.sample(
         [prompt_ids],
         return_history=args.gif is not None,
-        **_sample_kwargs(args),
+        **_sample_kwargs(args, tokenizer),
     )
     text = decode_generations(tokenizer, output)[0]
+    if args.sampling_stats and output.stats:
+        stats = output.stats
+        print(
+            f"Sampling: {stats.forward_evaluations} NFE, "
+            f"{stats.tokens_committed} commitments, "
+            f"{stats.tokens_remasked} remasks, "
+            f"{stats.tokens_revised} revisions, "
+            f"{stats.elapsed_seconds:.2f}s",
+            file=sys.stderr,
+        )
     gif_path = None
     if args.gif:
         from diffusion_llm.visualization import save_denoising_gif
@@ -448,6 +622,10 @@ def _run_generate(args: argparse.Namespace) -> None:
             args.gif,
             prompt=args.prompt,
             frame_duration_ms=args.gif_frame_duration_ms,
+            max_frames=args.gif_max_frames,
+            text_columns=args.gif_text_columns,
+            max_prompt_lines=args.gif_max_prompt_lines,
+            max_result_lines=args.gif_max_result_lines,
         )
     if args.json:
         print(
@@ -457,7 +635,10 @@ def _run_generate(args: argparse.Namespace) -> None:
                     "system_prompt": args.system_prompt,
                     "text": text,
                     "prompt_tokens": len(prompt_ids),
-                    "generated_tokens": args.max_new_tokens,
+                    "generated_tokens": len(
+                        tokenizer.encode(text, add_special_tokens=False)
+                    ),
+                    "sampler": output.stats.to_dict() if output.stats else None,
                     "gif": str(gif_path) if gif_path else None,
                 },
                 ensure_ascii=False,
@@ -483,6 +664,13 @@ def _run_evaluate(args: argparse.Namespace) -> None:
         f"exact match: {metrics['exact_match_rate']:.1%} | "
         f"lexical token F1: {metrics['mean_lexical_token_f1']:.3f}"
     )
+    sampler_totals = summary.get("sampler_totals", {})
+    if args.sampling_stats and sampler_totals:
+        print(
+            f"Sampler totals: {int(sampler_totals.get('forward_evaluations', 0))} NFE, "
+            f"{int(sampler_totals.get('tokens_remasked', 0))} remasks, "
+            f"{int(sampler_totals.get('tokens_revised', 0))} revisions"
+        )
 
 
 def _run_chat(args: argparse.Namespace) -> None:
@@ -512,9 +700,18 @@ def _run_chat(args: argparse.Namespace) -> None:
             prompt_ids = encode_prompt(tokenizer, messages=messages, chat_template=True)
         else:
             prompt_ids = encode_prompt(tokenizer, prompt)
-        output = sampler.sample([prompt_ids], **_sample_kwargs(args))
+        output = sampler.sample(
+            [prompt_ids],
+            **_sample_kwargs(args, tokenizer),
+        )
         response = decode_generations(tokenizer, output)[0]
         print(f"model> {response}")
+        if args.sampling_stats and output.stats:
+            print(
+                f"       [{output.stats.forward_evaluations} NFE, "
+                f"{output.stats.tokens_remasked} remasks, "
+                f"{output.stats.tokens_revised} revisions]"
+            )
         if use_template:
             messages.append({"role": "assistant", "content": response})
 

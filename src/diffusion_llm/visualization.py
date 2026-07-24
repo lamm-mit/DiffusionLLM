@@ -8,7 +8,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-from diffusion_llm.sampling import SamplerOutput
+from diffusion_llm.sampling import SamplerOutput, TrajectoryEvent
 
 _BACKGROUND = "#080C18"
 _PANEL = "#11182A"
@@ -146,6 +146,7 @@ def _render_frame(
     step: int,
     total_steps: int,
     columns: int,
+    event: TrajectoryEvent | None = None,
 ) -> Image.Image:
     width = 1280
     margin = 58
@@ -214,6 +215,13 @@ def _render_frame(
             fill=_ACCENT,
         )
     status = f"{step} / {total_steps}"
+    if event is not None:
+        details = [event.kind, f"NFE {event.forward_evaluations}"]
+        if event.remasked:
+            details.append(f"remasked {event.remasked}")
+        if event.revised:
+            details.append(f"revised {event.revised}")
+        status = f"{status}  ·  {'  ·  '.join(details)}"
     status_box = draw.textbbox((0, 0), status, font=small_font)
     draw.text(
         (width - margin - (status_box[2] - status_box[0]), bar_top + 17),
@@ -224,6 +232,46 @@ def _render_frame(
     return image
 
 
+def _frame_indices(
+    frame_count: int,
+    max_frames: int,
+    events: list[TrajectoryEvent] | None,
+) -> list[int]:
+    """Downsample a trajectory while prioritizing remask and revision events."""
+    if frame_count <= max_frames:
+        return list(range(frame_count))
+    priority = {0, frame_count - 1}
+    if events and len(events) == frame_count:
+        priority.update(
+            index
+            for index, event in enumerate(events)
+            if event.kind == "remask" or event.revised
+        )
+    if len(priority) >= max_frames:
+        ordered = sorted(priority)
+        return sorted(
+            {
+                ordered[
+                    round(index * (len(ordered) - 1) / max(1, max_frames - 1))
+                ]
+                for index in range(max_frames)
+            }
+        )
+    remaining = max_frames - len(priority)
+    evenly_spaced = {
+        round(index * (frame_count - 1) / max(1, remaining + 1))
+        for index in range(1, remaining + 1)
+    }
+    selected = sorted(priority | evenly_spaced)
+    if len(selected) < max_frames:
+        selected.extend(
+            index
+            for index in range(frame_count)
+            if index not in selected
+        )
+    return sorted(selected[:max_frames])
+
+
 def save_denoising_gif(
     tokenizer: Any,
     output: SamplerOutput,
@@ -232,6 +280,7 @@ def save_denoising_gif(
     prompt: str,
     frame_duration_ms: int = 220,
     row: int = 0,
+    max_frames: int = 120,
     text_columns: int = 92,
     max_prompt_lines: int = 8,
     max_result_lines: int = 24,
@@ -243,13 +292,26 @@ def save_denoising_gif(
         raise ValueError("GIF frame duration must be at least 20 ms.")
     if text_columns < 20:
         raise ValueError("GIF text columns must be at least 20.")
+    if max_frames < 2:
+        raise ValueError("GIF max frames must be at least 2.")
     if row < 0 or row >= output.sequences.shape[0]:
         raise ValueError("GIF row is outside the sampler batch.")
 
     prompt_length = output.prompt_lengths[row]
-    history = [
+    complete_history = [
         frame[row, prompt_length:].detach().cpu().tolist() for frame in output.histories
     ]
+    selected_indices = _frame_indices(
+        len(complete_history),
+        max_frames,
+        output.events,
+    )
+    history = [complete_history[index] for index in selected_indices]
+    selected_events = (
+        [output.events[index] for index in selected_indices]
+        if output.events and len(output.events) == len(complete_history)
+        else [None] * len(history)
+    )
     mask_token_id = tokenizer.mask_token_id
     if mask_token_id is None:
         raise ValueError("Tokenizer must define a mask token.")
@@ -259,21 +321,21 @@ def save_denoising_gif(
         columns=text_columns,
         max_lines=max_prompt_lines,
     )
-    final_styled = _styled_characters(tokenizer, history[-1], None, mask_token_id)
+    maximum_line_count = max(
+        len(
+            _wrap_styled(
+                _styled_characters(tokenizer, token_ids, None, mask_token_id),
+                columns=text_columns,
+                max_lines=max_result_lines,
+            )
+        )
+        for token_ids in history
+    )
     result_line_capacity = min(
         max_result_lines,
-        max(
-            3,
-            len(
-                _wrap_styled(
-                    final_styled,
-                    columns=text_columns,
-                    max_lines=max_result_lines,
-                )
-            ),
-        ),
+        max(3, maximum_line_count),
     )
-    total_steps = len(history) - 1
+    total_steps = len(complete_history) - 1
     frames = [
         _render_frame(
             tokenizer=tokenizer,
@@ -282,9 +344,10 @@ def save_denoising_gif(
             mask_token_id=mask_token_id,
             prompt_lines=wrapped_prompt,
             result_line_capacity=result_line_capacity,
-            step=index,
+            step=selected_indices[index],
             total_steps=total_steps,
             columns=text_columns,
+            event=selected_events[index],
         )
         for index, token_ids in enumerate(history)
     ]
