@@ -435,6 +435,7 @@ class MaskedDiffusionSampler:
         max_nfe: int | None,
         block_starts: torch.Tensor | None = None,
         block_ends: torch.Tensor | None = None,
+        diffusion_time: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if max_nfe is not None and stats.forward_evaluations >= max_nfe:
             raise RuntimeError("The maximum forward-evaluation budget was exhausted.")
@@ -443,6 +444,33 @@ class MaskedDiffusionSampler:
             "attention_mask": attention_mask,
             "use_cache": False,
         }
+        if (
+            getattr(
+                self.model.config,
+                "diffusion_time_conditioning",
+                "none",
+            )
+            == "additive"
+        ):
+            if diffusion_time is None:
+                active = attention_mask.bool()
+                if block_starts is not None and block_ends is not None:
+                    positions = torch.arange(
+                        tokens.shape[1],
+                        device=tokens.device,
+                    )[None, :]
+                    active &= (
+                        positions >= block_starts[:, None]
+                    ) & (
+                        positions < block_ends[:, None]
+                    )
+                diffusion_time = (
+                    tokens.eq(self.tokenizer.mask_token_id)
+                    .logical_and(active)
+                    .sum(dim=1)
+                    / active.sum(dim=1).clamp_min(1)
+                )
+            model_kwargs["diffusion_time"] = diffusion_time
         if (
             getattr(
                 self.model.config,
@@ -475,6 +503,30 @@ class MaskedDiffusionSampler:
         block_starts: torch.Tensor | None = None,
         block_ends: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        diffusion_time = None
+        if (
+            getattr(
+                self.model.config,
+                "diffusion_time_conditioning",
+                "none",
+            )
+            == "additive"
+        ):
+            active = attention_mask.bool()
+            if block_starts is not None and block_ends is not None:
+                positions = torch.arange(
+                    tokens.shape[1],
+                    device=tokens.device,
+                )[None, :]
+                active &= (
+                    positions >= block_starts[:, None]
+                ) & (
+                    positions < block_ends[:, None]
+                )
+            diffusion_time = (
+                tokens.eq(mask_id).logical_and(active).sum(dim=1)
+                / active.sum(dim=1).clamp_min(1)
+            )
         conditional = self._conditional_forward(
             tokens,
             attention_mask,
@@ -483,6 +535,7 @@ class MaskedDiffusionSampler:
             max_nfe=max_nfe,
             block_starts=block_starts,
             block_ends=block_ends,
+            diffusion_time=diffusion_time,
         )
         if cfg_scale == 0:
             return self._align_logits(conditional)
@@ -503,6 +556,7 @@ class MaskedDiffusionSampler:
             max_nfe=max_nfe,
             block_starts=block_starts,
             block_ends=block_ends,
+            diffusion_time=diffusion_time,
         )
         guided = conditional.float() + cfg_scale * (
             conditional.float() - unconditional.float()

@@ -113,3 +113,47 @@ def test_block_logits_ignore_future_blocks_but_use_active_block() -> None:
 
     assert (base_logits[:, 2] - active_logits[:, 2]).abs().max() > 1e-5
     assert torch.allclose(base_logits[:, 2], future_logits[:, 2], atol=1e-6, rtol=1e-6)
+
+
+def test_additive_time_conditioning_starts_as_exact_noop() -> None:
+    torch.manual_seed(0)
+    config = DiffusionQwen2Config(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+        pad_token_id=0,
+        attn_implementation="sdpa",
+        diffusion_time_conditioning="additive",
+        diffusion_time_embedding_dim=16,
+    )
+    model = DiffusionQwen2ForMaskedLM(config).eval()
+    tokens = torch.tensor([[1, 2, 3, 4]])
+    with torch.no_grad():
+        early = model(
+            tokens,
+            diffusion_time=torch.tensor([0.1]),
+        ).logits
+        late = model(
+            tokens,
+            diffusion_time=torch.tensor([0.9]),
+        ).logits
+    assert torch.equal(early, late)
+
+    conditioner = model.model.diffusion_time_conditioner
+    assert conditioner is not None
+    with torch.no_grad():
+        conditioner.projection[-1].weight.normal_(std=0.01)
+    with torch.no_grad():
+        learned_early = model(
+            tokens,
+            diffusion_time=torch.tensor([0.1]),
+        ).logits
+        learned_late = model(
+            tokens,
+            diffusion_time=torch.tensor([0.9]),
+        ).logits
+    assert not torch.allclose(learned_early, learned_late)

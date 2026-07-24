@@ -208,6 +208,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("full-bidirectional", "block-causal"),
         default="full-bidirectional",
     )
+    convert.add_argument(
+        "--time-conditioning",
+        choices=("none", "additive"),
+        default="none",
+    )
+    convert.add_argument("--time-embedding-dim", type=int, default=256)
     convert.set_defaults(handler=_run_convert)
 
     train_parser = commands.add_parser("train", help="Pretrain or SFT a converted model.")
@@ -270,8 +276,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train_parser.add_argument(
         "--mask-sampling",
-        choices=("bernoulli", "uniform-count"),
+        choices=("bernoulli", "uniform-count", "progressive"),
         default="bernoulli",
+    )
+    train_parser.add_argument("--progressive-stages", type=int, default=8)
+    train_parser.add_argument(
+        "--progressive-mask-probability",
+        type=float,
+        default=1.0,
+        help="Mix progressive states with uniform-count states.",
     )
     train_parser.add_argument(
         "--loss-normalization",
@@ -291,6 +304,37 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--train-block-sizes", default="16,32,64")
     train_parser.add_argument("--full-mdlm-ratio", type=float, default=0.25)
     train_parser.add_argument("--ar-loss-weight", type=float, default=0.0)
+    train_parser.add_argument("--condition-dropout", type=float, default=0.0)
+    train_parser.add_argument(
+        "--condition-dropout-mode",
+        choices=("mask", "pad"),
+        default="mask",
+    )
+    train_parser.add_argument(
+        "--mask-tail-augmentation",
+        type=float,
+        default=0.0,
+        help="Probability of appending masked canvas tokens during training.",
+    )
+    train_parser.add_argument("--mask-tail-max-tokens", type=int, default=64)
+    train_parser.add_argument("--mask-consistency-weight", type=float, default=0.0)
+    train_parser.add_argument(
+        "--time-conditioning",
+        choices=("none", "additive"),
+        default="none",
+    )
+    train_parser.add_argument("--time-embedding-dim", type=int, default=256)
+    train_parser.add_argument(
+        "--self-conditioning-probability",
+        type=float,
+        default=0.0,
+    )
+    train_parser.add_argument(
+        "--draft-commit-probability",
+        type=float,
+        default=0.5,
+    )
+    train_parser.add_argument("--draft-loss-weight", type=float, default=0.1)
     train_parser.add_argument("--seed", type=int, default=42)
     train_parser.add_argument("--bf16", action="store_true")
     train_parser.add_argument("--fp16", action="store_true")
@@ -504,6 +548,8 @@ def _run_convert(args: argparse.Namespace) -> None:
         overwrite=args.overwrite,
         prediction_parameterization=args.prediction_parameterization,
         attention_pattern=args.attention_pattern,
+        time_conditioning=args.time_conditioning,
+        time_embedding_dim=args.time_embedding_dim,
     )
     print(f"Converted diffusion checkpoint: {output}")
 

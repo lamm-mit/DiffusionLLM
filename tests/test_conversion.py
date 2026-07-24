@@ -45,3 +45,23 @@ def test_conversion_records_block_shift_architecture(
     config = AutoConfig.from_pretrained(output)
     assert config.diffusion_prediction_parameterization == "shifted"
     assert config.diffusion_attention_pattern == "block-causal"
+
+
+def test_conversion_can_add_zero_initialized_time_conditioning(
+    tiny_ar_checkpoint: Path,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "diffusion-time"
+    convert_checkpoint(
+        str(tiny_ar_checkpoint),
+        output,
+        dtype="float32",
+        time_conditioning="additive",
+        time_embedding_dim=16,
+    )
+
+    config = AutoConfig.from_pretrained(output)
+    model = AutoModelForMaskedLM.from_pretrained(output)
+    assert config.diffusion_time_conditioning == "additive"
+    assert config.diffusion_time_embedding_dim == 16
+    assert model.model.diffusion_time_conditioner is not None

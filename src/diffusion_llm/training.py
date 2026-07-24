@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -19,13 +19,16 @@ from diffusion_llm.collator import DiffusionDataCollator
 from diffusion_llm.corruption import (
     build_block_corruption,
     build_full_corruption,
+    fully_mask_targets,
     parse_block_sizes,
+    progressive_corruption_from_confidence,
     reduce_diffusion_loss,
     same_position_token_loss,
     shifted_token_loss,
 )
 from diffusion_llm.data import load_splits, prepare_pretraining, prepare_sft
 from diffusion_llm.loading import load_model, load_tokenizer
+from diffusion_llm.modeling import configure_time_conditioning
 from diffusion_llm.schedule import loss_weight, mask_probability
 
 
@@ -71,6 +74,18 @@ class TrainConfig:
     train_block_sizes: str = "16,32,64"
     full_mdlm_ratio: float = 0.25
     ar_loss_weight: float = 0.0
+    progressive_stages: int = 8
+    progressive_mask_probability: float = 1.0
+    condition_dropout: float = 0.0
+    condition_dropout_mode: str = "mask"
+    mask_tail_augmentation: float = 0.0
+    mask_tail_max_tokens: int = 64
+    mask_consistency_weight: float = 0.0
+    time_conditioning: str = "none"
+    time_embedding_dim: int = 256
+    self_conditioning_probability: float = 0.0
+    draft_commit_probability: float = 0.5
+    draft_loss_weight: float = 0.1
     seed: int = 42
     bf16: bool = False
     fp16: bool = False
@@ -108,6 +123,18 @@ class MDLMTrainer(Trainer):
         train_block_sizes: str | list[int] | tuple[int, ...] = "16,32,64",
         full_mdlm_ratio: float = 0.25,
         ar_loss_weight: float = 0.0,
+        progressive_stages: int = 8,
+        progressive_mask_probability: float = 1.0,
+        condition_dropout: float = 0.0,
+        condition_dropout_mode: str = "mask",
+        pad_token_id: int | None = None,
+        mask_tail_augmentation: float = 0.0,
+        mask_tail_max_tokens: int = 64,
+        mask_consistency_weight: float = 0.0,
+        time_conditioning: str = "none",
+        self_conditioning_probability: float = 0.0,
+        draft_commit_probability: float = 0.5,
+        draft_loss_weight: float = 0.1,
         **kwargs: Any,
     ):
         super().__init__(*args, **kwargs)
@@ -130,8 +157,10 @@ class MDLMTrainer(Trainer):
             raise ValueError("Unknown diffusion training objective.")
         if time_sampling not in {"uniform", "stratified"}:
             raise ValueError("time_sampling must be 'uniform' or 'stratified'.")
-        if mask_sampling not in {"bernoulli", "uniform-count"}:
-            raise ValueError("mask_sampling must be 'bernoulli' or 'uniform-count'.")
+        if mask_sampling not in {"bernoulli", "uniform-count", "progressive"}:
+            raise ValueError(
+                "mask_sampling must be 'bernoulli', 'uniform-count', or 'progressive'."
+            )
         if loss_normalization not in {"token", "sequence"}:
             raise ValueError("loss_normalization must be 'token' or 'sequence'.")
         if prediction_parameterization not in {"same-position", "shifted"}:
@@ -144,6 +173,33 @@ class MDLMTrainer(Trainer):
             raise ValueError("full_mdlm_ratio must lie in [0, 1].")
         if ar_loss_weight < 0:
             raise ValueError("ar_loss_weight must be non-negative.")
+        if progressive_stages < 1:
+            raise ValueError("progressive_stages must be positive.")
+        for name, value in {
+            "progressive_mask_probability": progressive_mask_probability,
+            "condition_dropout": condition_dropout,
+            "mask_tail_augmentation": mask_tail_augmentation,
+            "self_conditioning_probability": self_conditioning_probability,
+            "draft_commit_probability": draft_commit_probability,
+        }.items():
+            if not 0 <= value <= 1:
+                raise ValueError(f"{name} must lie in [0, 1].")
+        if condition_dropout_mode not in {"mask", "pad"}:
+            raise ValueError("condition_dropout_mode must be 'mask' or 'pad'.")
+        if condition_dropout and condition_dropout_mode == "pad" and pad_token_id is None:
+            raise ValueError("pad condition dropout requires pad_token_id.")
+        if mask_tail_max_tokens < 1:
+            raise ValueError("mask_tail_max_tokens must be positive.")
+        if mask_consistency_weight < 0:
+            raise ValueError("mask_consistency_weight must be non-negative.")
+        if mask_consistency_weight and not mask_tail_augmentation:
+            raise ValueError(
+                "mask_consistency_weight requires nonzero mask_tail_augmentation."
+            )
+        if time_conditioning not in {"none", "additive"}:
+            raise ValueError("time_conditioning must be 'none' or 'additive'.")
+        if draft_loss_weight < 0:
+            raise ValueError("draft_loss_weight must be non-negative.")
         self.mask_token_id = mask_token_id
         self.time_epsilon = time_epsilon
         self.loss_weighting = loss_weighting
@@ -156,6 +212,153 @@ class MDLMTrainer(Trainer):
         self.train_block_sizes = parse_block_sizes(train_block_sizes)
         self.full_mdlm_ratio = full_mdlm_ratio
         self.ar_loss_weight = ar_loss_weight
+        self.progressive_stages = progressive_stages
+        self.progressive_mask_probability = progressive_mask_probability
+        self.condition_dropout = condition_dropout
+        self.condition_dropout_mode = condition_dropout_mode
+        self.pad_token_id = pad_token_id
+        self.mask_tail_augmentation = mask_tail_augmentation
+        self.mask_tail_max_tokens = mask_tail_max_tokens
+        self.mask_consistency_weight = mask_consistency_weight
+        self.time_conditioning = time_conditioning
+        self.self_conditioning_probability = self_conditioning_probability
+        self.draft_commit_probability = draft_commit_probability
+        self.draft_loss_weight = draft_loss_weight
+
+    def _model_kwargs(
+        self,
+        corruption: Any,
+        attention_mask: torch.Tensor,
+        *,
+        use_block: bool,
+    ) -> dict[str, torch.Tensor | bool | None]:
+        kwargs: dict[str, torch.Tensor | bool | None] = {
+            "input_ids": corruption.noised_ids,
+            "attention_mask": attention_mask,
+            "use_cache": False,
+        }
+        if self.time_conditioning == "additive":
+            kwargs["diffusion_time"] = corruption.diffusion_time
+        if use_block:
+            kwargs["diffusion_block_starts"] = corruption.block_starts
+            kwargs["diffusion_block_ends"] = corruption.block_ends
+        return kwargs
+
+    def _align_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        if self.prediction_parameterization == "same-position":
+            return logits
+        return F.pad(logits[:, :-1], (0, 0, 1, 0))
+
+    def _drop_conditions(
+        self,
+        corruption: Any,
+        labels: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> tuple[Any, torch.Tensor]:
+        if not self.condition_dropout:
+            return corruption, attention_mask
+        dropped_rows = (
+            torch.rand(labels.shape[0], device=labels.device)
+            < self.condition_dropout
+        )
+        condition_mask = (
+            labels.eq(-100)
+            & attention_mask.bool()
+            & dropped_rows[:, None]
+        )
+        replacement = (
+            self.mask_token_id
+            if self.condition_dropout_mode == "mask"
+            else self.pad_token_id
+        )
+        assert replacement is not None
+        noised_ids = corruption.noised_ids.masked_fill(
+            condition_mask,
+            replacement,
+        )
+        updated_attention = attention_mask.clone()
+        if self.condition_dropout_mode == "pad":
+            updated_attention = updated_attention.masked_fill(condition_mask, 0)
+        return replace(corruption, noised_ids=noised_ids), updated_attention
+
+    def _augment_mask_tail(
+        self,
+        corruption: Any,
+        attention_mask: torch.Tensor,
+        original_attention_mask: torch.Tensor,
+    ) -> tuple[Any, torch.Tensor, torch.Tensor]:
+        tail_mask = torch.zeros_like(attention_mask, dtype=torch.bool)
+        if not self.mask_tail_augmentation:
+            return corruption, attention_mask, tail_mask
+        for row in range(attention_mask.shape[0]):
+            if torch.rand((), device=attention_mask.device) >= self.mask_tail_augmentation:
+                continue
+            valid_positions = original_attention_mask[row].nonzero(
+                as_tuple=False
+            ).flatten()
+            start = (
+                int(valid_positions[-1].item()) + 1
+                if valid_positions.numel()
+                else 0
+            )
+            available = attention_mask.shape[1] - start
+            maximum = min(self.mask_tail_max_tokens, available)
+            if maximum < 1:
+                continue
+            count = int(
+                torch.randint(
+                    1,
+                    maximum + 1,
+                    (1,),
+                    device=attention_mask.device,
+                ).item()
+            )
+            tail_mask[row, start : start + count] = True
+        noised_ids = corruption.noised_ids.masked_fill(
+            tail_mask,
+            self.mask_token_id,
+        )
+        updated_attention = attention_mask.masked_fill(tail_mask, 1)
+        return replace(corruption, noised_ids=noised_ids), updated_attention, tail_mask
+
+    def _commit_drafts(
+        self,
+        corruption: Any,
+        predictions: torch.Tensor,
+    ) -> tuple[Any, torch.Tensor]:
+        candidates = corruption.loss_mask
+        draft_mask = (
+            torch.rand(candidates.shape, device=candidates.device)
+            < self.draft_commit_probability
+        ) & candidates
+        for row in range(candidates.shape[0]):
+            positions = candidates[row].nonzero(as_tuple=False).flatten()
+            selected = draft_mask[row].sum()
+            if positions.numel() <= 1:
+                draft_mask[row] = False
+            elif selected == positions.numel():
+                draft_mask[row, positions[-1]] = False
+        noised_ids = corruption.noised_ids.clone()
+        noised_ids[draft_mask] = predictions[draft_mask]
+        loss_mask = corruption.loss_mask & ~draft_mask
+        masked_counts = loss_mask.sum(dim=1)
+        row_weights = corruption.target_counts / masked_counts.clamp_min(1)
+        return (
+            replace(
+                corruption,
+                noised_ids=noised_ids,
+                loss_mask=loss_mask,
+                token_weights=row_weights[:, None].expand_as(noised_ids),
+                diffusion_time=(
+                    masked_counts / corruption.target_counts.clamp_min(1)
+                ),
+                mask_probability=(
+                    masked_counts / corruption.target_counts.clamp_min(1)
+                ),
+                masked_counts=masked_counts,
+            ),
+            draft_mask,
+        )
 
     def compute_loss(
         self,
@@ -174,6 +377,9 @@ class MDLMTrainer(Trainer):
         input_ids = inputs["input_ids"]
         labels = inputs["labels"]
         attention_mask = inputs.get("attention_mask")
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+        original_attention_mask = attention_mask.clone()
         objective_labels = labels
         if self.prediction_parameterization == "shifted":
             objective_labels = labels.clone()
@@ -184,6 +390,18 @@ class MDLMTrainer(Trainer):
             use_block = bool(
                 torch.rand((), device=input_ids.device) >= self.full_mdlm_ratio
             )
+        use_progressive = (
+            self.mask_sampling == "progressive"
+            and bool(
+                torch.rand((), device=input_ids.device)
+                < self.progressive_mask_probability
+            )
+        )
+        base_mask_sampling = (
+            "uniform-count"
+            if self.mask_sampling == "progressive"
+            else self.mask_sampling
+        )
         if use_block:
             corruption = build_block_corruption(
                 input_ids,
@@ -192,7 +410,7 @@ class MDLMTrainer(Trainer):
                 block_sizes=self.train_block_sizes,
                 time_epsilon=self.time_epsilon,
                 time_sampling=self.time_sampling,
-                mask_sampling=self.mask_sampling,
+                mask_sampling=base_mask_sampling,
                 loss_weighting=self.loss_weighting,
             )
         else:
@@ -202,19 +420,77 @@ class MDLMTrainer(Trainer):
                 mask_token_id=self.mask_token_id,
                 time_epsilon=self.time_epsilon,
                 time_sampling=self.time_sampling,
-                mask_sampling=self.mask_sampling,
+                mask_sampling=base_mask_sampling,
                 loss_weighting=self.loss_weighting,
             )
-        model_kwargs: dict[str, torch.Tensor | bool | None] = {
-            "input_ids": corruption.noised_ids,
-            "attention_mask": attention_mask,
-            "use_cache": False,
-        }
-        if use_block:
-            model_kwargs["diffusion_block_starts"] = corruption.block_starts
-            model_kwargs["diffusion_block_ends"] = corruption.block_ends
+        corruption, attention_mask = self._drop_conditions(
+            corruption,
+            labels,
+            attention_mask,
+        )
+        reference_attention_mask = attention_mask.clone()
+        corruption, attention_mask, tail_mask = self._augment_mask_tail(
+            corruption,
+            attention_mask,
+            original_attention_mask,
+        )
+
+        use_self_conditioning = (
+            self.self_conditioning_probability
+            and bool(
+                torch.rand((), device=input_ids.device)
+                < self.self_conditioning_probability
+            )
+        )
+        proposal_logits: torch.Tensor | None = None
+        if use_progressive:
+            proposal_state = fully_mask_targets(
+                corruption,
+                mask_token_id=self.mask_token_id,
+            )
+            with torch.no_grad():
+                proposal_logits = model(
+                    **self._model_kwargs(
+                        proposal_state,
+                        attention_mask,
+                        use_block=use_block,
+                    )
+                ).logits
+            aligned_proposal = self._align_logits(proposal_logits)
+            confidence = aligned_proposal.float().log_softmax(dim=-1).gather(
+                -1,
+                input_ids.unsqueeze(-1),
+            ).squeeze(-1).exp()
+            corruption = progressive_corruption_from_confidence(
+                corruption,
+                confidence,
+                mask_token_id=self.mask_token_id,
+                stages=self.progressive_stages,
+            )
+
+        draft_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+        if use_self_conditioning:
+            if proposal_logits is None:
+                with torch.no_grad():
+                    proposal_logits = model(
+                        **self._model_kwargs(
+                            corruption,
+                            attention_mask,
+                            use_block=use_block,
+                        )
+                    ).logits
+            predictions = self._align_logits(proposal_logits).argmax(dim=-1)
+            corruption, draft_mask = self._commit_drafts(
+                corruption,
+                predictions,
+            )
+
         outputs = model(
-            **model_kwargs,
+            **self._model_kwargs(
+                corruption,
+                attention_mask,
+                use_block=use_block,
+            )
         )
         if self.prediction_parameterization == "shifted":
             token_loss = shifted_token_loss(outputs.logits, input_ids)
@@ -237,6 +513,32 @@ class MDLMTrainer(Trainer):
                 ar_token_loss = shifted_token_loss(outputs.logits, input_ids)
                 ar_loss = (ar_token_loss * ar_mask).sum() / ar_mask.sum()
                 loss = loss + self.ar_loss_weight * ar_loss
+        if self.draft_loss_weight and draft_mask.any():
+            draft_loss = (token_loss * draft_mask).sum() / draft_mask.sum()
+            loss = loss + self.draft_loss_weight * draft_loss
+        if self.mask_consistency_weight and tail_mask.any():
+            reference_ids = corruption.noised_ids.clone()
+            reference_ids[tail_mask] = input_ids[tail_mask]
+            reference_state = replace(corruption, noised_ids=reference_ids)
+            with torch.no_grad():
+                reference_logits = model(
+                    **self._model_kwargs(
+                        reference_state,
+                        reference_attention_mask,
+                        use_block=use_block,
+                    )
+                ).logits
+            primary = self._align_logits(outputs.logits).float()
+            reference = self._align_logits(reference_logits).float()
+            consistency_tokens = F.kl_div(
+                primary.log_softmax(dim=-1),
+                reference.softmax(dim=-1),
+                reduction="none",
+            ).sum(dim=-1)
+            consistency_loss = (
+                consistency_tokens * corruption.loss_mask
+            ).sum() / corruption.loss_mask.sum().clamp_min(1)
+            loss = loss + self.mask_consistency_weight * consistency_loss
         return (loss, outputs) if return_outputs else loss
 
     def _compute_legacy_loss(
@@ -382,11 +684,28 @@ def train(config: TrainConfig) -> Path:
         config.prediction_parameterization
     )
     model.config.diffusion_attention_pattern = config.attention_pattern
+    model.config.diffusion_time_conditioning = config.time_conditioning
+    model.config.diffusion_time_embedding_dim = config.time_embedding_dim
+    advanced_training = (
+        config.mask_sampling == "progressive"
+        or config.condition_dropout > 0
+        or config.mask_tail_augmentation > 0
+        or config.mask_consistency_weight > 0
+        or config.time_conditioning != "none"
+        or config.self_conditioning_probability > 0
+    )
     model.config.diffusion_training_version = (
-        1 if config.objective == "legacy-mdlm" else 2
+        1
+        if config.objective == "legacy-mdlm" and not advanced_training
+        else 3 if advanced_training else 2
     )
     if hasattr(model, "model"):
         model.model.config = model.config
+    configure_time_conditioning(
+        model,
+        kind=config.time_conditioning,
+        embedding_dim=config.time_embedding_dim,
+    )
     model = _apply_lora(model, config)
 
     train_dataset, eval_dataset = load_splits(
@@ -422,12 +741,20 @@ def train(config: TrainConfig) -> Path:
 
     has_eval = eval_dataset is not None and len(eval_dataset) > 0
     training_args = _build_training_arguments(config, output_dir, has_eval=has_eval)
+    fixed_canvas = (
+        config.max_length
+        if config.mask_tail_augmentation or config.mask_consistency_weight
+        else None
+    )
     trainer = MDLMTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        data_collator=DiffusionDataCollator(tokenizer),
+        data_collator=DiffusionDataCollator(
+            tokenizer,
+            pad_to_length=fixed_canvas,
+        ),
         processing_class=tokenizer,
         mask_token_id=tokenizer.mask_token_id,
         time_epsilon=config.time_epsilon,
@@ -441,6 +768,18 @@ def train(config: TrainConfig) -> Path:
         train_block_sizes=config.train_block_sizes,
         full_mdlm_ratio=config.full_mdlm_ratio,
         ar_loss_weight=config.ar_loss_weight,
+        progressive_stages=config.progressive_stages,
+        progressive_mask_probability=config.progressive_mask_probability,
+        condition_dropout=config.condition_dropout,
+        condition_dropout_mode=config.condition_dropout_mode,
+        pad_token_id=tokenizer.pad_token_id,
+        mask_tail_augmentation=config.mask_tail_augmentation,
+        mask_tail_max_tokens=config.mask_tail_max_tokens,
+        mask_consistency_weight=config.mask_consistency_weight,
+        time_conditioning=config.time_conditioning,
+        self_conditioning_probability=config.self_conditioning_probability,
+        draft_commit_probability=config.draft_commit_probability,
+        draft_loss_weight=config.draft_loss_weight,
     )
     trainer.train(resume_from_checkpoint=config.resume_from_checkpoint)
     (output_dir / "training_config.json").write_text(

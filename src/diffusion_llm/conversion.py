@@ -16,6 +16,7 @@ from diffusion_llm.modeling import (
     BASE_MODEL_BY_SOURCE_TYPE,
     CONFIG_BY_SOURCE_TYPE,
     MODEL_BY_SOURCE_TYPE,
+    configure_time_conditioning,
 )
 
 
@@ -60,6 +61,8 @@ def convert_checkpoint(
     overwrite: bool = False,
     prediction_parameterization: str = "same-position",
     attention_pattern: str = "full-bidirectional",
+    time_conditioning: str = "none",
+    time_embedding_dim: int = 256,
 ) -> Path:
     """Convert an AR model without duplicating the model in host memory.
 
@@ -78,6 +81,10 @@ def convert_checkpoint(
         raise ValueError(
             "attention-pattern must be 'full-bidirectional' or 'block-causal'."
         )
+    if time_conditioning not in {"none", "additive"}:
+        raise ValueError("time-conditioning must be 'none' or 'additive'.")
+    if time_embedding_dim < 2:
+        raise ValueError("time-embedding-dim must be at least 2.")
 
     tokenizer = AutoTokenizer.from_pretrained(source, trust_remote_code=trust_remote_code)
     source_model = None
@@ -124,6 +131,8 @@ def convert_checkpoint(
     target_config.diffusion_method = "mdlm"
     target_config.diffusion_prediction_parameterization = prediction_parameterization
     target_config.diffusion_attention_pattern = attention_pattern
+    target_config.diffusion_time_conditioning = time_conditioning
+    target_config.diffusion_time_embedding_dim = time_embedding_dim
     target_config.diffusion_training_version = 1
     target_config.source_model_name_or_path = source
     target_config.source_model_type = source_type
@@ -142,6 +151,11 @@ def convert_checkpoint(
             if hasattr(module, "config"):
                 module.config = target_config
         target_model = source_model
+        configure_time_conditioning(
+            target_model,
+            kind=time_conditioning,
+            embedding_dim=time_embedding_dim,
+        )
 
     target_model.save_pretrained(output_dir, safe_serialization=True)
     tokenizer.save_pretrained(output_dir)
@@ -155,6 +169,8 @@ def convert_checkpoint(
         "random_init": random_init,
         "prediction_parameterization": prediction_parameterization,
         "attention_pattern": attention_pattern,
+        "time_conditioning": time_conditioning,
+        "time_embedding_dim": time_embedding_dim,
     }
     (output_dir / "diffusion_metadata.json").write_text(
         json.dumps(metadata, indent=2) + "\n",

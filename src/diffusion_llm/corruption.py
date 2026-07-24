@@ -6,7 +6,7 @@ the explicit, testable foundation for opt-in v2 objectives.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -29,6 +29,103 @@ class CorruptionBatch:
     original_target_mask: torch.Tensor | None = None
     block_starts: torch.Tensor | None = None
     block_ends: torch.Tensor | None = None
+
+
+def fully_mask_targets(
+    corruption: CorruptionBatch,
+    *,
+    mask_token_id: int,
+) -> CorruptionBatch:
+    """Return the same diffusion region with every active target masked."""
+    noised_ids = corruption.noised_ids.masked_fill(
+        corruption.target_mask,
+        mask_token_id,
+    )
+    target_counts = corruption.target_mask.sum(dim=1)
+    probabilities = target_counts.gt(0).to(torch.float32)
+    return replace(
+        corruption,
+        noised_ids=noised_ids,
+        loss_mask=corruption.target_mask.clone(),
+        token_weights=torch.ones_like(
+            corruption.token_weights,
+            dtype=torch.float32,
+        ),
+        diffusion_time=probabilities,
+        mask_probability=probabilities,
+        target_counts=target_counts,
+        masked_counts=target_counts,
+    )
+
+
+def progressive_corruption_from_confidence(
+    corruption: CorruptionBatch,
+    confidence: torch.Tensor,
+    *,
+    mask_token_id: int,
+    stages: int,
+    generator: torch.Generator | None = None,
+) -> CorruptionBatch:
+    """Build a PUMA-inspired high-confidence partial denoising state.
+
+    A random phase is selected per sequence. The clean tokens with the highest
+    proposal confidence are revealed up to that phase, and the remaining
+    positions form the training target. At least one target stays masked.
+    """
+    if stages < 1:
+        raise ValueError("progressive-stages must be positive.")
+    if confidence.shape != corruption.target_mask.shape:
+        raise ValueError("confidence and target_mask must have the same shape.")
+
+    target_mask = corruption.target_mask
+    target_counts = target_mask.sum(dim=1)
+    batch_size = target_mask.shape[0]
+    phases = torch.randint(
+        0,
+        stages,
+        (batch_size,),
+        device=target_mask.device,
+        generator=generator,
+    )
+    offsets = _random(
+        (batch_size,),
+        device=target_mask.device,
+        generator=generator,
+    )
+    revealed_fraction = (phases.to(torch.float32) + offsets) / stages
+    reveal_counts = torch.floor(
+        revealed_fraction * target_counts
+    ).to(torch.long)
+    reveal_counts = torch.minimum(
+        reveal_counts,
+        (target_counts - 1).clamp_min(0),
+    )
+
+    revealed = torch.zeros_like(target_mask)
+    ranked_confidence = confidence.masked_fill(~target_mask, -torch.inf)
+    for row in range(batch_size):
+        count = int(reveal_counts[row].item())
+        if count:
+            positions = ranked_confidence[row].argsort(descending=True)[:count]
+            revealed[row, positions] = True
+
+    loss_mask = target_mask & ~revealed
+    masked_counts = loss_mask.sum(dim=1)
+    noised_ids = corruption.noised_ids.clone()
+    noised_ids[target_mask] = corruption.clean_ids[target_mask]
+    noised_ids = noised_ids.masked_fill(loss_mask, mask_token_id)
+    probabilities = masked_counts / target_counts.clamp_min(1)
+    row_weights = target_counts / masked_counts.clamp_min(1)
+    return replace(
+        corruption,
+        noised_ids=noised_ids,
+        loss_mask=loss_mask,
+        token_weights=row_weights[:, None].expand_as(corruption.clean_ids),
+        diffusion_time=probabilities,
+        mask_probability=probabilities,
+        target_counts=target_counts,
+        masked_counts=masked_counts,
+    )
 
 
 def _random(

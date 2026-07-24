@@ -240,6 +240,39 @@ def test_train_cli_preserves_legacy_defaults_and_parses_v2_objective() -> None:
     assert v2.mask_sampling == "uniform-count"
     assert v2.loss_normalization == "sequence"
 
+    advanced = parser.parse_args(
+        [
+            "train",
+            "--model",
+            "base",
+            "--dataset",
+            "data",
+            "--output",
+            "output",
+            "--objective",
+            "mdlm-v2",
+            "--mask-sampling",
+            "progressive",
+            "--condition-dropout",
+            "0.1",
+            "--mask-tail-augmentation",
+            "0.25",
+            "--mask-consistency-weight",
+            "0.05",
+            "--time-conditioning",
+            "additive",
+            "--self-conditioning-probability",
+            "0.5",
+        ]
+    )
+    assert advanced.mask_sampling == "progressive"
+    assert advanced.progressive_stages == 8
+    assert advanced.condition_dropout == pytest.approx(0.1)
+    assert advanced.mask_tail_augmentation == pytest.approx(0.25)
+    assert advanced.mask_consistency_weight == pytest.approx(0.05)
+    assert advanced.time_conditioning == "additive"
+    assert advanced.self_conditioning_probability == pytest.approx(0.5)
+
     block = parser.parse_args(
         [
             "train",

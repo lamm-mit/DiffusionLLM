@@ -143,6 +143,81 @@ def test_block_shift_objective_backward(
     assert any(parameter.grad is not None for parameter in model.parameters())
 
 
+def test_progressive_conditioned_objective_backward(
+    tiny_ar_checkpoint: Path,
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "diffusion-progressive"
+    convert_checkpoint(
+        str(tiny_ar_checkpoint),
+        checkpoint,
+        dtype="float32",
+        time_conditioning="additive",
+        time_embedding_dim=16,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+    model = AutoModelForMaskedLM.from_pretrained(checkpoint)
+    batch = DiffusionDataCollator(
+        tokenizer,
+        pad_to_length=8,
+    )(
+        [
+            {"input_ids": [4, 5, 6, 7], "labels": [-100, 5, 6, 7]},
+            {"input_ids": [4, 8, 7], "labels": [-100, 8, 7]},
+        ]
+    )
+    trainer = MDLMTrainer(
+        model=model,
+        args=TrainingArguments(
+            output_dir=str(tmp_path / "trainer-progressive"),
+            report_to=[],
+            use_cpu=True,
+        ),
+        mask_token_id=tokenizer.mask_token_id,
+        pad_token_id=tokenizer.pad_token_id,
+        objective="mdlm-v2",
+        time_sampling="stratified",
+        mask_sampling="progressive",
+        loss_normalization="sequence",
+        progressive_stages=4,
+        progressive_mask_probability=1.0,
+        condition_dropout=1.0,
+        mask_tail_augmentation=1.0,
+        mask_tail_max_tokens=2,
+        mask_consistency_weight=0.05,
+        time_conditioning="additive",
+        self_conditioning_probability=1.0,
+        draft_commit_probability=0.5,
+        draft_loss_weight=0.1,
+    )
+    torch.manual_seed(3)
+    loss = trainer.compute_loss(model, batch)
+    assert torch.isfinite(loss)
+    loss.backward()
+    time_gradients = [
+        parameter.grad
+        for name, parameter in model.named_parameters()
+        if "diffusion_time_conditioner" in name
+    ]
+    assert any(gradient is not None for gradient in time_gradients)
+
+
+def test_fixed_canvas_collator_preserves_padding_labels(
+    tiny_ar_checkpoint: Path,
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "diffusion-canvas"
+    convert_checkpoint(str(tiny_ar_checkpoint), checkpoint, dtype="float32")
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+    batch = DiffusionDataCollator(tokenizer, pad_to_length=6)(
+        [{"input_ids": [4, 5], "labels": [-100, 5]}]
+    )
+
+    assert batch["input_ids"].shape == (1, 6)
+    assert batch["attention_mask"].tolist() == [[1, 1, 0, 0, 0, 0]]
+    assert batch["labels"].tolist() == [[-100, 5, -100, -100, -100, -100]]
+
+
 def test_lora_wraps_diffusion_model(
     tiny_ar_checkpoint: Path,
     tmp_path: Path,

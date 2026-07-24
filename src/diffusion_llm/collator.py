@@ -15,11 +15,18 @@ class DiffusionDataCollator:
 
     tokenizer: PreTrainedTokenizerBase
     pad_to_multiple_of: int | None = None
+    pad_to_length: int | None = None
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         if not features:
             raise ValueError("Cannot collate an empty feature list.")
         max_length = max(len(feature["input_ids"]) for feature in features)
+        if self.pad_to_length is not None:
+            if self.pad_to_length < max_length:
+                raise ValueError(
+                    "pad_to_length cannot be shorter than an input feature."
+                )
+            max_length = self.pad_to_length
         if self.pad_to_multiple_of:
             multiple = self.pad_to_multiple_of
             max_length = ((max_length + multiple - 1) // multiple) * multiple

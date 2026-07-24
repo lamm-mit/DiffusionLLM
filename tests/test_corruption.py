@@ -8,6 +8,8 @@ from diffusion_llm.corruption import (
     CorruptionBatch,
     build_block_corruption,
     build_full_corruption,
+    fully_mask_targets,
+    progressive_corruption_from_confidence,
     reduce_diffusion_loss,
     sample_diffusion_times,
 )
@@ -117,3 +119,34 @@ def test_block_corruption_masks_future_targets_and_only_trains_active_block() ->
     assert not corruption.target_mask[:, :start].any()
     assert not corruption.target_mask[:, end:].any()
     assert corruption.noised_ids[0, end:].eq(9).all()
+
+
+def test_progressive_corruption_reveals_high_confidence_tokens() -> None:
+    input_ids = torch.tensor([[2, 3, 4, 5]])
+    labels = torch.tensor([[-100, 3, 4, 5]])
+    base = build_full_corruption(
+        input_ids,
+        labels,
+        mask_token_id=9,
+        time_epsilon=1e-3,
+        time_sampling="uniform",
+        mask_sampling="uniform-count",
+        loss_weighting="schedule",
+        generator=torch.Generator().manual_seed(2),
+    )
+    fully_masked = fully_mask_targets(base, mask_token_id=9)
+    confidence = torch.tensor([[0.0, 0.9, 0.6, 0.1]])
+    progressive = progressive_corruption_from_confidence(
+        fully_masked,
+        confidence,
+        mask_token_id=9,
+        stages=1,
+        generator=torch.Generator().manual_seed(4),
+    )
+
+    assert progressive.masked_counts.item() >= 1
+    assert progressive.noised_ids[0, 1].item() == 3
+    assert progressive.noised_ids[progressive.loss_mask].eq(9).all()
+    assert progressive.diffusion_time.item() == (
+        progressive.masked_counts / progressive.target_counts
+    ).item()
