@@ -20,6 +20,7 @@ import transformers
 
 from diffusion_llm import __version__
 from diffusion_llm.conversion import convert_checkpoint
+from diffusion_llm.evaluation import GenerationEvalConfig, evaluate_checkpoint
 from diffusion_llm.loading import choose_device, load_model, load_tokenizer
 from diffusion_llm.mixture import (
     MixtureBuildConfig,
@@ -288,6 +289,30 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--json", action="store_true", help="Emit a machine-readable result.")
     generate.set_defaults(handler=_run_generate)
 
+    evaluate = commands.add_parser(
+        "evaluate",
+        help="Generate answers for a reproducible sample from a held-out dataset split.",
+    )
+    _add_inference_arguments(evaluate)
+    evaluate.add_argument("--dataset", required=True)
+    evaluate.add_argument("--dataset-config")
+    evaluate.add_argument("--split", default="validation")
+    evaluate.add_argument("--num-samples", type=int, default=32)
+    evaluate.add_argument("--batch-size", type=int, default=1)
+    evaluate.add_argument(
+        "--max-total-tokens",
+        type=int,
+        help="Skip prompts whose prompt plus generation would exceed this length.",
+    )
+    evaluate.add_argument("--source-field", default="source")
+    evaluate.add_argument("--output", required=True, help="Detailed JSONL result path.")
+    evaluate.add_argument(
+        "--summary-output",
+        help="Summary JSON path; defaults to OUTPUT with a .summary.json suffix.",
+    )
+    evaluate.add_argument("--overwrite", action="store_true")
+    evaluate.set_defaults(handler=_run_evaluate)
+
     chat = commands.add_parser("chat", help="Start an interactive diffusion chat.")
     _add_inference_arguments(chat)
     chat.add_argument(
@@ -442,6 +467,22 @@ def _run_generate(args: argparse.Namespace) -> None:
         print(text)
         if gif_path:
             print(f"\nDenoising GIF: {gif_path}")
+
+
+def _run_evaluate(args: argparse.Namespace) -> None:
+    values = vars(args).copy()
+    values.pop("command")
+    values.pop("handler")
+    output, summary_output, summary = evaluate_checkpoint(GenerationEvalConfig(**values))
+    metrics = summary["metrics"]
+    print(f"Generation records: {output}")
+    print(f"Evaluation summary: {summary_output}")
+    print(
+        f"Samples: {summary['samples']} | "
+        f"non-empty: {metrics['nonempty_rate']:.1%} | "
+        f"exact match: {metrics['exact_match_rate']:.1%} | "
+        f"lexical token F1: {metrics['mean_lexical_token_f1']:.3f}"
+    )
 
 
 def _run_chat(args: argparse.Namespace) -> None:

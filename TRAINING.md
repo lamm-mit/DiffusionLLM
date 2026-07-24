@@ -542,7 +542,48 @@ reveal iterations per block, so 512 steps fully uses this configuration. A
 larger `--steps` value is capped by the reveal schedule and does not add useful
 passes.
 
-## 6. Continue on the scientific-design dataset
+## 6. Evaluate fixed held-out generations
+
+The periodic `eval_loss` already measures the diffusion objective on 512
+held-out rows. Because evaluation samples new diffusion times and corruption
+masks, individual loss measurements are noisy. Complement them with a fixed
+generation suite:
+
+```bash
+MODEL=artifacts/qwen2.5-1.5b-diffusion-chatmix-1024-2m-from-base/checkpoint-4400
+
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
+CUDA_VISIBLE_DEVICES=0 \
+uv run --no-sync diffusion-llm evaluate \
+  --model "$MODEL" \
+  --dataset lamm-mit/diffusion-chat-mixture-1024 \
+  --dataset-config chatmix_2m \
+  --split validation \
+  --num-samples 32 \
+  --batch-size 2 \
+  --max-total-tokens 1024 \
+  --max-new-tokens 512 \
+  --steps 512 \
+  --block-size 8 \
+  --temperature 0 \
+  --dtype bfloat16 \
+  --device cuda:0 \
+  --output artifacts/checkpoint-4400-heldout.jsonl
+```
+
+The evaluator shuffles deterministically with `--seed 42` by default. It uses
+every message before the final assistant message as the prompt, including any
+system message, and treats that final assistant message as the reference.
+`--max-total-tokens 1024` keeps the prompt plus generation canvas within the
+training sequence length and reports how many longer rows were skipped.
+
+Repeat the command for checkpoints near steps 4,400 and 8,000 and for the final
+model, changing only `--model` and `--output`. Compare the detailed JSONL files
+blindly. Exact match and lexical token F1 are diagnostics, not reliable measures
+of semantic quality for open-ended answers; use human inspection or a blinded
+LLM judge for the primary comparison.
+
+## 7. Continue on the scientific-design dataset
 
 After the broad 1024-token stage, specialize at a lower learning rate. Three
 epochs over the 9k-example scientific split are a sensible first run; compare

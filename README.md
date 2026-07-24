@@ -21,6 +21,7 @@ training it, and generating text by iterative denoising.
 - Full-parameter and LoRA training.
 - Parallel and blockwise iterative denoising.
 - Chat-template-aware SFT and inference.
+- Reproducible held-out generation evaluation with JSONL records and summaries.
 - Animated GIF export of the complete denoising trajectory.
 - Optional automatic model and checkpoint uploads to the Hugging Face Hub.
 - Manifest-driven, exact-size chat-mixture construction with recoverable uploads.
@@ -314,6 +315,54 @@ uv run diffusion-llm generate \
   --gif artifacts/ultrachat-denoising.gif \
   --gif-frame-duration-ms 140
 ```
+
+## Evaluate held-out generations
+
+Training reports held-out diffusion loss when `--eval-split` is set. Use the
+`evaluate` command to complement that loss with generated answers from a fixed,
+shuffled sample of the held-out split:
+
+```bash
+MODEL=artifacts/qwen2.5-1.5b-diffusion-chatmix-1024-2m-from-base/checkpoint-4400
+
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
+CUDA_VISIBLE_DEVICES=0 \
+uv run --no-sync diffusion-llm evaluate \
+  --model "$MODEL" \
+  --dataset lamm-mit/diffusion-chat-mixture-1024 \
+  --dataset-config chatmix_2m \
+  --split validation \
+  --num-samples 32 \
+  --batch-size 2 \
+  --max-total-tokens 1024 \
+  --max-new-tokens 512 \
+  --steps 512 \
+  --block-size 8 \
+  --temperature 0 \
+  --dtype bfloat16 \
+  --device cuda:0 \
+  --output artifacts/checkpoint-4400-heldout.jsonl
+```
+
+Rows must use `messages`, `instruction`/`output`, or
+`prompt`/`response`/`completion`. Preformatted `text` rows cannot be separated
+into prompt and reference and are skipped. For chat data, the final assistant
+message becomes the reference and all preceding messages become the prompt.
+This preserves system messages and multi-turn context. The same chat formatting
+path is used by SFT preprocessing and evaluation.
+
+The detailed JSONL stores prompts, references, generations, token counts,
+source labels, exact match, and lexical token F1. A sibling
+`checkpoint-4400-heldout.summary.json` contains aggregate and per-source
+statistics plus counts of unsupported or over-length rows. Pass
+`--summary-output PATH` to choose another summary location or `--overwrite` to
+replace existing results.
+
+For checkpoint comparisons, keep the dataset, split, seed, length settings,
+and decoding settings fixed. `--temperature 0` makes low-confidence decoding
+deterministic. Lexical F1 measures surface overlap only; open-ended chat quality
+should be assessed by inspecting the saved generations or with a blinded human
+or LLM judge.
 
 ## Weights & Biases experiment tracking
 

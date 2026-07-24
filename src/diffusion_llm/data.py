@@ -15,12 +15,13 @@ from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
 from diffusion_llm.tokenization import token_id_list
 
 
-def _load_dataset(
+def load_dataset_source(
     source: str,
     *,
     dataset_config: str | None,
     split: str | None,
 ) -> Dataset | DatasetDict:
+    """Load a Hub or local dataset source using the project's supported formats."""
     path = Path(source).expanduser()
     if path.exists():
         if path.is_dir() and (
@@ -53,13 +54,17 @@ def load_splits(
     seed: int = 42,
 ) -> tuple[Dataset, Dataset | None]:
     """Load train/evaluation splits, creating an evaluation split if requested."""
-    train = _load_dataset(source, dataset_config=dataset_config, split=train_split)
+    train = load_dataset_source(source, dataset_config=dataset_config, split=train_split)
     if isinstance(train, DatasetDict):
         train = train[train_split]
 
     evaluation = None
     if eval_split:
-        evaluation = _load_dataset(source, dataset_config=dataset_config, split=eval_split)
+        evaluation = load_dataset_source(
+            source,
+            dataset_config=dataset_config,
+            split=eval_split,
+        )
         if isinstance(evaluation, DatasetDict):
             evaluation = evaluation[eval_split]
     elif validation_fraction > 0 and len(train) > 1:
@@ -127,7 +132,8 @@ def prepare_pretraining(
     return train, evaluation
 
 
-def _messages_from_row(row: dict[str, Any]) -> list[dict[str, str]] | None:
+def messages_from_row(row: dict[str, Any]) -> list[dict[str, str]] | None:
+    """Normalize a supported SFT row into chat messages when possible."""
     messages = row.get("messages")
     if messages:
         return [{"role": str(item["role"]), "content": str(item["content"])} for item in messages]
@@ -163,11 +169,12 @@ def _manual_chat(messages: list[dict[str, str]], generation_prompt: bool) -> str
     return rendered
 
 
-def _encode_chat(
+def encode_chat_messages(
     tokenizer: Any,
     messages: list[dict[str, str]],
     generation_prompt: bool,
 ) -> list[int]:
+    """Encode chat messages exactly as the SFT preprocessing path does."""
     if getattr(tokenizer, "chat_template", None):
         return token_id_list(
             tokenizer.apply_chat_template(
@@ -208,7 +215,7 @@ def prepare_sft(
     workers = num_proc if num_proc > 1 else None
 
     def tokenize_row(row: dict[str, Any]) -> dict[str, list[int]]:
-        messages = _messages_from_row(row)
+        messages = messages_from_row(row)
         if messages is None:
             text = row.get("text")
             if text is None:
@@ -222,10 +229,14 @@ def prepare_sft(
 
         if not messages or messages[-1]["role"] != "assistant":
             raise ValueError("Each SFT conversation must end with an assistant message.")
-        full_ids = _encode_chat(tokenizer, messages, generation_prompt=False)
+        full_ids = encode_chat_messages(tokenizer, messages, generation_prompt=False)
         labels = full_ids.copy()
         if mask_prompt_loss:
-            prompt_ids = _encode_chat(tokenizer, messages[:-1], generation_prompt=True)
+            prompt_ids = encode_chat_messages(
+                tokenizer,
+                messages[:-1],
+                generation_prompt=True,
+            )
             prompt_length = _common_prefix_length(prompt_ids, full_ids)
             labels[:prompt_length] = [-100] * prompt_length
         full_ids = full_ids[:max_length]

@@ -198,6 +198,48 @@ def test_train_cli_parses_hub_options() -> None:
     assert args.run_name == "classroom-run"
 
 
+def test_evaluate_cli_parses_heldout_generation_options() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "evaluate",
+            "--model",
+            "checkpoint-4400",
+            "--dataset",
+            "lamm-mit/diffusion-chat-mixture-1024",
+            "--dataset-config",
+            "chatmix_2m",
+            "--split",
+            "validation",
+            "--num-samples",
+            "32",
+            "--batch-size",
+            "2",
+            "--max-total-tokens",
+            "1024",
+            "--max-new-tokens",
+            "512",
+            "--steps",
+            "512",
+            "--block-size",
+            "8",
+            "--temperature",
+            "0",
+            "--output",
+            "artifacts/heldout.jsonl",
+            "--no-progress",
+        ]
+    )
+
+    assert args.dataset_config == "chatmix_2m"
+    assert args.split == "validation"
+    assert args.num_samples == 32
+    assert args.batch_size == 2
+    assert args.max_total_tokens == 1024
+    assert args.max_new_tokens == 512
+    assert args.output == "artifacts/heldout.jsonl"
+    assert not args.progress
+
+
 def test_build_mixture_cli_uses_safe_upload_default() -> None:
     args = cli.build_parser().parse_args(
         [
