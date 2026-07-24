@@ -58,6 +58,8 @@ def convert_checkpoint(
     random_init: bool = False,
     trust_remote_code: bool = False,
     overwrite: bool = False,
+    prediction_parameterization: str = "same-position",
+    attention_pattern: str = "full-bidirectional",
 ) -> Path:
     """Convert an AR model without duplicating the model in host memory.
 
@@ -68,6 +70,14 @@ def convert_checkpoint(
     """
     output_dir = Path(output).expanduser().resolve()
     _validate_output_directory(output_dir, overwrite)
+    if prediction_parameterization not in {"same-position", "shifted"}:
+        raise ValueError(
+            "prediction-parameterization must be 'same-position' or 'shifted'."
+        )
+    if attention_pattern not in {"full-bidirectional", "block-causal"}:
+        raise ValueError(
+            "attention-pattern must be 'full-bidirectional' or 'block-causal'."
+        )
 
     tokenizer = AutoTokenizer.from_pretrained(source, trust_remote_code=trust_remote_code)
     source_model = None
@@ -112,6 +122,9 @@ def convert_checkpoint(
     target_config.mask_token_id = tokenizer.mask_token_id
     target_config.use_cache = False
     target_config.diffusion_method = "mdlm"
+    target_config.diffusion_prediction_parameterization = prediction_parameterization
+    target_config.diffusion_attention_pattern = attention_pattern
+    target_config.diffusion_training_version = 1
     target_config.source_model_name_or_path = source
     target_config.source_model_type = source_type
     target_config.architectures = [MODEL_BY_SOURCE_TYPE[source_type].__name__]
@@ -140,6 +153,8 @@ def convert_checkpoint(
         "mask_token": tokenizer.mask_token,
         "mask_token_id": tokenizer.mask_token_id,
         "random_init": random_init,
+        "prediction_parameterization": prediction_parameterization,
+        "attention_pattern": attention_pattern,
     }
     (output_dir / "diffusion_metadata.json").write_text(
         json.dumps(metadata, indent=2) + "\n",

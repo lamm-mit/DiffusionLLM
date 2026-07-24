@@ -39,6 +39,8 @@ from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3PreTrainedModel,
 )
 
+from diffusion_llm.attention import create_block_causal_mask
+
 
 def _positions(
     inputs_embeds: torch.Tensor,
@@ -55,6 +57,51 @@ def _positions(
         device=inputs_embeds.device,
     )
     return positions.unsqueeze(0)
+
+
+def _full_or_block_mask(
+    config: Any,
+    inputs_embeds: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    past_key_values: Cache | None,
+    block_starts: torch.Tensor | None,
+    block_ends: torch.Tensor | None,
+) -> torch.Tensor | None:
+    pattern = getattr(
+        config,
+        "diffusion_attention_pattern",
+        "full-bidirectional",
+    )
+    if pattern == "full-bidirectional" or block_starts is None or block_ends is None:
+        return create_bidirectional_mask(
+            config=config,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+        )
+    if pattern != "block-causal":
+        raise ValueError(f"Unknown diffusion attention pattern: {pattern}.")
+    if past_key_values is not None and past_key_values.get_seq_length() > 0:
+        raise ValueError("Block-causal training masks do not support a populated KV cache.")
+    if attention_mask is None:
+        attention_mask = torch.ones(
+            inputs_embeds.shape[:2],
+            dtype=torch.long,
+            device=inputs_embeds.device,
+        )
+    return create_block_causal_mask(
+        attention_mask,
+        block_starts,
+        block_ends,
+        shifted_prediction=(
+            getattr(
+                config,
+                "diffusion_prediction_parameterization",
+                "same-position",
+            )
+            == "shifted"
+        ),
+    )
 
 
 class DiffusionLlamaConfig(LlamaConfig):
@@ -76,6 +123,8 @@ class DiffusionLlamaModel(LlamaModel):
         past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
+        diffusion_block_starts: torch.LongTensor | None = None,
+        diffusion_block_ends: torch.LongTensor | None = None,
         **kwargs: Any,
     ) -> BaseModelOutputWithPast:
         if (input_ids is None) == (inputs_embeds is None):
@@ -85,11 +134,13 @@ class DiffusionLlamaModel(LlamaModel):
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
         position_ids = _positions(inputs_embeds, past_key_values, position_ids)
-        full_mask = create_bidirectional_mask(
-            config=self.config,
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
+        full_mask = _full_or_block_mask(
+            self.config,
+            inputs_embeds,
+            attention_mask,
+            past_key_values,
+            diffusion_block_starts,
+            diffusion_block_ends,
         )
         kwargs["is_causal"] = False
 
@@ -144,6 +195,8 @@ class DiffusionQwen2Model(Qwen2Model):
         past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
+        diffusion_block_starts: torch.LongTensor | None = None,
+        diffusion_block_ends: torch.LongTensor | None = None,
         **kwargs: Any,
     ) -> BaseModelOutputWithPast:
         if (input_ids is None) == (inputs_embeds is None):
@@ -155,13 +208,17 @@ class DiffusionQwen2Model(Qwen2Model):
         position_ids = _positions(inputs_embeds, past_key_values, position_ids)
 
         if isinstance(attention_mask, dict):
+            if diffusion_block_starts is not None or diffusion_block_ends is not None:
+                raise ValueError("Block boundaries cannot be combined with a mask mapping.")
             mask_mapping = attention_mask
         else:
-            full_mask = create_bidirectional_mask(
-                config=self.config,
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
+            full_mask = _full_or_block_mask(
+                self.config,
+                inputs_embeds,
+                attention_mask,
+                past_key_values,
+                diffusion_block_starts,
+                diffusion_block_ends,
             )
             mask_mapping = {"full_attention": full_mask}
             if self.has_sliding_layers:
@@ -219,6 +276,8 @@ class DiffusionQwen3Model(Qwen3Model):
         past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
+        diffusion_block_starts: torch.LongTensor | None = None,
+        diffusion_block_ends: torch.LongTensor | None = None,
         **kwargs: Any,
     ) -> BaseModelOutputWithPast:
         if (input_ids is None) == (inputs_embeds is None):
@@ -230,13 +289,17 @@ class DiffusionQwen3Model(Qwen3Model):
         position_ids = _positions(inputs_embeds, past_key_values, position_ids)
 
         if isinstance(attention_mask, dict):
+            if diffusion_block_starts is not None or diffusion_block_ends is not None:
+                raise ValueError("Block boundaries cannot be combined with a mask mapping.")
             mask_mapping = attention_mask
         else:
-            full_mask = create_bidirectional_mask(
-                config=self.config,
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
+            full_mask = _full_or_block_mask(
+                self.config,
+                inputs_embeds,
+                attention_mask,
+                past_key_values,
+                diffusion_block_starts,
+                diffusion_block_ends,
             )
             mask_mapping = {"full_attention": full_mask}
             if self.has_sliding_layers:

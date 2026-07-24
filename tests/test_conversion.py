@@ -23,5 +23,25 @@ def test_conversion_preserves_model_and_adds_mask(
     assert config.model_type == "diffusion-qwen2"
     assert isinstance(model, DiffusionQwen2ForMaskedLM)
     assert tokenizer.mask_token_id == config.mask_token_id
+    assert config.diffusion_prediction_parameterization == "same-position"
+    assert config.diffusion_attention_pattern == "full-bidirectional"
     assert model.get_input_embeddings().num_embeddings == len(tokenizer)
     assert (output / "diffusion_metadata.json").exists()
+
+
+def test_conversion_records_block_shift_architecture(
+    tiny_ar_checkpoint: Path,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "diffusion-block-shift"
+    convert_checkpoint(
+        str(tiny_ar_checkpoint),
+        output,
+        dtype="float32",
+        prediction_parameterization="shifted",
+        attention_pattern="block-causal",
+    )
+
+    config = AutoConfig.from_pretrained(output)
+    assert config.diffusion_prediction_parameterization == "shifted"
+    assert config.diffusion_attention_pattern == "block-causal"

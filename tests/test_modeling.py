@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from diffusion_llm.attention import create_block_causal_mask
 from diffusion_llm.modeling import (
     DiffusionLlamaConfig,
     DiffusionLlamaForMaskedLM,
@@ -74,3 +75,41 @@ def test_right_padding_does_not_change_real_token_logits() -> None:
             attention_mask=torch.tensor([[1, 1, 1, 0]]),
         ).logits[:, :3]
     assert torch.allclose(unpadded, padded, atol=1e-6, rtol=1e-6)
+
+
+def test_block_causal_mask_is_causal_in_prefix_and_bidirectional_in_block() -> None:
+    padding = torch.tensor([[1, 1, 1, 1, 1, 0]])
+    mask = create_block_causal_mask(
+        padding,
+        torch.tensor([2]),
+        torch.tensor([4]),
+        shifted_prediction=True,
+    )[0, 0]
+
+    assert mask[0].tolist() == [True, False, False, False, False, False]
+    assert mask[1].tolist() == [True, True, True, True, False, False]
+    assert mask[2].tolist() == [True, True, True, True, False, False]
+    assert mask[4].tolist() == [True, True, True, True, True, False]
+    assert not mask[5].any()
+
+
+def test_block_logits_ignore_future_blocks_but_use_active_block() -> None:
+    torch.manual_seed(0)
+    model = tiny_model()
+    model.config.diffusion_attention_pattern = "block-causal"
+    model.config.diffusion_prediction_parameterization = "same-position"
+    base = torch.tensor([[1, 2, 3, 4, 5]])
+    changed_active = torch.tensor([[1, 2, 3, 8, 5]])
+    changed_future = torch.tensor([[1, 2, 3, 4, 9]])
+    kwargs = {
+        "attention_mask": torch.ones_like(base),
+        "diffusion_block_starts": torch.tensor([2]),
+        "diffusion_block_ends": torch.tensor([4]),
+    }
+    with torch.no_grad():
+        base_logits = model(base, **kwargs).logits
+        active_logits = model(changed_active, **kwargs).logits
+        future_logits = model(changed_future, **kwargs).logits
+
+    assert (base_logits[:, 2] - active_logits[:, 2]).abs().max() > 1e-5
+    assert torch.allclose(base_logits[:, 2], future_logits[:, 2], atol=1e-6, rtol=1e-6)

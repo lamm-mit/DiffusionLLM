@@ -293,3 +293,27 @@ def test_eos_is_remaskable_when_pad_and_eos_share_an_id() -> None:
     assert output.stats is not None
     assert output.stats.tokens_remasked == 1
     assert output.sequences[0, 2].item() == EosTokenizer.eos_token_id
+
+
+class ShiftedToyModel(ToyModel):
+    def __init__(self):
+        super().__init__()
+        self.config.diffusion_prediction_parameterization = "shifted"
+
+    def forward(self, input_ids, attention_mask=None, use_cache=False, **kwargs):
+        batch, length = input_ids.shape
+        logits = torch.full((batch, length, 10), -20.0, device=input_ids.device)
+        logits[..., 4] = 20.0
+        logits[:, 1, 5] = 30.0
+        return SimpleNamespace(logits=logits)
+
+
+def test_shifted_checkpoint_uses_previous_position_logits() -> None:
+    output = MaskedDiffusionSampler(ShiftedToyModel(), ToyTokenizer()).sample(
+        [[2, 3]],
+        max_new_tokens=1,
+        steps=1,
+        block_size=1,
+    )
+
+    assert output.sequences[0, 2].item() == 5

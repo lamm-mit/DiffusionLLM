@@ -99,6 +99,50 @@ def test_gradient_accumulation_normalizes_custom_loss(tmp_path: Path) -> None:
     assert model.weight.grad.item() == pytest.approx(0.5)
 
 
+def test_block_shift_objective_backward(
+    tiny_ar_checkpoint: Path,
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "diffusion-block"
+    convert_checkpoint(
+        str(tiny_ar_checkpoint),
+        checkpoint,
+        dtype="float32",
+        prediction_parameterization="shifted",
+        attention_pattern="block-causal",
+    )
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+    model = AutoModelForMaskedLM.from_pretrained(checkpoint)
+    batch = DiffusionDataCollator(tokenizer)(
+        [
+            {"input_ids": [4, 5, 6, 7], "labels": [-100, 5, 6, 7]},
+            {"input_ids": [4, 8, 7], "labels": [-100, 8, 7]},
+        ]
+    )
+    trainer = MDLMTrainer(
+        model=model,
+        args=TrainingArguments(
+            output_dir=str(tmp_path / "trainer-block"),
+            report_to=[],
+            use_cpu=True,
+        ),
+        mask_token_id=tokenizer.mask_token_id,
+        objective="block-hybrid",
+        prediction_parameterization="shifted",
+        attention_pattern="block-causal",
+        train_block_sizes="2",
+        full_mdlm_ratio=0.0,
+        ar_loss_weight=0.1,
+        time_sampling="stratified",
+        mask_sampling="uniform-count",
+        loss_normalization="sequence",
+    )
+    loss = trainer.compute_loss(model, batch)
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert any(parameter.grad is not None for parameter in model.parameters())
+
+
 def test_lora_wraps_diffusion_model(
     tiny_ar_checkpoint: Path,
     tmp_path: Path,

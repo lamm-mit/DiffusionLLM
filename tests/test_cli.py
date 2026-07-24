@@ -240,6 +240,35 @@ def test_train_cli_preserves_legacy_defaults_and_parses_v2_objective() -> None:
     assert v2.mask_sampling == "uniform-count"
     assert v2.loss_normalization == "sequence"
 
+    block = parser.parse_args(
+        [
+            "train",
+            "--model",
+            "base",
+            "--dataset",
+            "data",
+            "--output",
+            "output",
+            "--objective",
+            "block-hybrid",
+            "--prediction-parameterization",
+            "shifted",
+            "--attention-pattern",
+            "block-causal",
+            "--train-block-sizes",
+            "16,32,64",
+            "--full-mdlm-ratio",
+            "0.25",
+            "--ar-loss-weight",
+            "0.1",
+        ]
+    )
+    assert block.objective == "block-hybrid"
+    assert block.prediction_parameterization == "shifted"
+    assert block.attention_pattern == "block-causal"
+    assert block.train_block_sizes == "16,32,64"
+    assert block.ar_loss_weight == pytest.approx(0.1)
+
 
 def test_evaluate_cli_parses_heldout_generation_options() -> None:
     args = cli.build_parser().parse_args(

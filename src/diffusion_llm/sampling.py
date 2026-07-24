@@ -218,6 +218,27 @@ class MaskedDiffusionSampler:
     def device(self) -> torch.device:
         return next(self.model.parameters()).device
 
+    @property
+    def prediction_parameterization(self) -> str:
+        return getattr(
+            self.model.config,
+            "diffusion_prediction_parameterization",
+            "same-position",
+        )
+
+    def _align_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        if self.prediction_parameterization == "same-position":
+            return logits
+        if self.prediction_parameterization != "shifted":
+            raise ValueError(
+                f"Unknown prediction parameterization: "
+                f"{self.prediction_parameterization}."
+            )
+        aligned = torch.empty_like(logits)
+        aligned[:, 0] = logits[:, 0]
+        aligned[:, 1:] = logits[:, :-1]
+        return aligned
+
     def _stop_ids(self) -> set[int]:
         return {
             int(token_id)
@@ -412,14 +433,27 @@ class MaskedDiffusionSampler:
         stats: SamplerStats,
         progress: Any,
         max_nfe: int | None,
+        block_starts: torch.Tensor | None = None,
+        block_ends: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if max_nfe is not None and stats.forward_evaluations >= max_nfe:
             raise RuntimeError("The maximum forward-evaluation budget was exhausted.")
-        output = self.model(
-            input_ids=tokens,
-            attention_mask=attention_mask,
-            use_cache=False,
-        ).logits
+        model_kwargs: dict[str, Any] = {
+            "input_ids": tokens,
+            "attention_mask": attention_mask,
+            "use_cache": False,
+        }
+        if (
+            getattr(
+                self.model.config,
+                "diffusion_attention_pattern",
+                "full-bidirectional",
+            )
+            == "block-causal"
+        ):
+            model_kwargs["diffusion_block_starts"] = block_starts
+            model_kwargs["diffusion_block_ends"] = block_ends
+        output = self.model(**model_kwargs).logits
         stats.forward_evaluations += 1
         progress.update(1)
         return output
@@ -438,6 +472,8 @@ class MaskedDiffusionSampler:
         stats: SamplerStats,
         progress: Any,
         max_nfe: int | None,
+        block_starts: torch.Tensor | None = None,
+        block_ends: torch.Tensor | None = None,
     ) -> torch.Tensor:
         conditional = self._conditional_forward(
             tokens,
@@ -445,9 +481,11 @@ class MaskedDiffusionSampler:
             stats=stats,
             progress=progress,
             max_nfe=max_nfe,
+            block_starts=block_starts,
+            block_ends=block_ends,
         )
         if cfg_scale == 0:
-            return conditional
+            return self._align_logits(conditional)
         unconditional_inputs, unconditional_attention = self._unconditional_inputs(
             tokens,
             attention_mask,
@@ -463,10 +501,13 @@ class MaskedDiffusionSampler:
             stats=stats,
             progress=progress,
             max_nfe=max_nfe,
+            block_starts=block_starts,
+            block_ends=block_ends,
         )
-        return conditional.float() + cfg_scale * (
+        guided = conditional.float() + cfg_scale * (
             conditional.float() - unconditional.float()
         )
+        return self._align_logits(guided)
 
     def _remask_scope(
         self,
@@ -514,6 +555,8 @@ class MaskedDiffusionSampler:
         progress: Any,
         max_nfe: int | None,
         reserved_nfe: int,
+        block_starts: torch.Tensor | None,
+        block_ends: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         candidates = scope & tokens.ne(mask_id)
         # Many chat tokenizers deliberately use EOS as their padding token.
@@ -582,7 +625,10 @@ class MaskedDiffusionSampler:
             stats=stats,
             progress=progress,
             max_nfe=max_nfe,
+            block_starts=block_starts,
+            block_ends=block_ends,
         )
+        probe_logits = self._align_logits(probe_logits)
         old_probabilities = _selected_probabilities(
             probe_logits[preselected],
             old_probe_tokens,
@@ -857,12 +903,20 @@ class MaskedDiffusionSampler:
         ) as progress:
             for block_index, iteration_budget in enumerate(budgets):
                 block_region = torch.zeros_like(response_positions)
+                current_block_starts = torch.zeros(
+                    (batch_size,),
+                    dtype=torch.long,
+                    device=tokens.device,
+                )
+                current_block_ends = torch.zeros_like(current_block_starts)
                 for row, prompt_length in enumerate(prompt_lengths):
                     start = prompt_length + block_index * block_size
                     stop = min(
                         start + block_size,
                         prompt_length + max_new_tokens,
                     )
+                    current_block_starts[row] = start
+                    current_block_ends[row] = stop
                     block_region[row, start:stop] = True
                 block_region &= response_positions
                 filled_once = finished.clone()
@@ -917,6 +971,8 @@ class MaskedDiffusionSampler:
                             progress=progress,
                             max_nfe=max_nfe,
                             reserved_nfe=base_forward_cost * remaining_main_iterations,
+                            block_starts=current_block_starts,
+                            block_ends=current_block_ends,
                         )
                         if pending_revision.any():
                             remasked_count = int(pending_revision.sum().item())
@@ -954,6 +1010,19 @@ class MaskedDiffusionSampler:
                         stats=stats,
                         progress=progress,
                         max_nfe=max_nfe,
+                        block_starts=(
+                            torch.minimum(
+                                current_block_starts,
+                                torch.where(
+                                    pending_revision.any(dim=1),
+                                    pending_revision.float().argmax(dim=1),
+                                    current_block_starts,
+                                ),
+                            )
+                            if pending_revision.any()
+                            else current_block_starts
+                        ),
+                        block_ends=current_block_ends,
                     )
                     suppressed_ids = {mask_id}
                     if pad_id not in stop_ids:

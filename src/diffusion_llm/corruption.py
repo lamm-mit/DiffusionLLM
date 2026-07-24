@@ -26,6 +26,9 @@ class CorruptionBatch:
     mask_probability: torch.Tensor
     target_counts: torch.Tensor
     masked_counts: torch.Tensor
+    original_target_mask: torch.Tensor | None = None
+    block_starts: torch.Tensor | None = None
+    block_ends: torch.Tensor | None = None
 
 
 def _random(
@@ -199,7 +202,128 @@ def build_full_corruption(
         mask_probability=probabilities,
         target_counts=target_counts,
         masked_counts=loss_mask.sum(dim=1),
+        original_target_mask=target_mask,
     )
+
+
+def parse_block_sizes(value: str | list[int] | tuple[int, ...]) -> tuple[int, ...]:
+    """Normalize a comma-separated or materialized block-size collection."""
+    if isinstance(value, str):
+        pieces = [piece.strip() for piece in value.split(",") if piece.strip()]
+        try:
+            sizes = tuple(int(piece) for piece in pieces)
+        except ValueError as exc:
+            raise ValueError("train-block-sizes must contain integers.") from exc
+    else:
+        sizes = tuple(int(size) for size in value)
+    if not sizes or any(size < 1 for size in sizes):
+        raise ValueError("train-block-sizes must contain positive integers.")
+    return sizes
+
+
+def build_block_corruption(
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    mask_token_id: int,
+    block_sizes: tuple[int, ...],
+    time_epsilon: float,
+    time_sampling: str,
+    mask_sampling: str,
+    loss_weighting: str,
+    generator: torch.Generator | None = None,
+) -> CorruptionBatch:
+    """Corrupt one randomly selected target block and mask every later target."""
+    original_target = labels.ne(-100)
+    if not original_target.any():
+        raise ValueError("Batch contains no trainable target tokens.")
+    batch_size, sequence_length = input_ids.shape
+    block_starts = torch.zeros(
+        (batch_size,),
+        dtype=torch.long,
+        device=input_ids.device,
+    )
+    block_ends = torch.zeros_like(block_starts)
+    active_target = torch.zeros_like(original_target)
+
+    size_choices = torch.randint(
+        0,
+        len(block_sizes),
+        (batch_size,),
+        device=input_ids.device,
+        generator=generator,
+    )
+    for row in range(batch_size):
+        positions = original_target[row].nonzero(as_tuple=False).flatten()
+        if positions.numel() == 0:
+            continue
+        block_size = block_sizes[int(size_choices[row].item())]
+        number_of_blocks = (positions.numel() + block_size - 1) // block_size
+        block_index = int(
+            torch.randint(
+                0,
+                number_of_blocks,
+                (1,),
+                device=input_ids.device,
+                generator=generator,
+            ).item()
+        )
+        first = block_index * block_size
+        selected = positions[first : first + block_size]
+        start = int(selected[0].item())
+        end = int(selected[-1].item()) + 1
+        block_starts[row] = start
+        block_ends[row] = end
+        active_target[row, selected] = True
+
+    active_labels = labels.masked_fill(~active_target, -100)
+    corruption = build_full_corruption(
+        input_ids,
+        active_labels,
+        mask_token_id=mask_token_id,
+        time_epsilon=time_epsilon,
+        time_sampling=time_sampling,
+        mask_sampling=mask_sampling,
+        loss_weighting=loss_weighting,
+        generator=generator,
+    )
+    future_target = original_target & (
+        torch.arange(sequence_length, device=input_ids.device)[None, :]
+        >= block_ends[:, None]
+    )
+    corruption.noised_ids = corruption.noised_ids.masked_fill(
+        future_target,
+        mask_token_id,
+    )
+    corruption.original_target_mask = original_target
+    corruption.block_starts = block_starts
+    corruption.block_ends = block_ends
+    return corruption
+
+
+def same_position_token_loss(
+    logits: torch.Tensor,
+    clean_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Return same-position vocabulary cross entropy."""
+    return torch.nn.functional.cross_entropy(
+        logits.transpose(1, 2),
+        clean_ids,
+        reduction="none",
+    )
+
+
+def shifted_token_loss(
+    logits: torch.Tensor,
+    clean_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Align token ``i`` with the pretrained AR logit at position ``i - 1``."""
+    shifted = torch.nn.functional.cross_entropy(
+        logits[:, :-1].transpose(1, 2),
+        clean_ids[:, 1:],
+        reduction="none",
+    )
+    return torch.nn.functional.pad(shifted, (1, 0))
 
 
 def reduce_diffusion_loss(

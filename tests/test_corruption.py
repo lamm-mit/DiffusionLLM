@@ -6,6 +6,7 @@ import torch
 
 from diffusion_llm.corruption import (
     CorruptionBatch,
+    build_block_corruption,
     build_full_corruption,
     reduce_diffusion_loss,
     sample_diffusion_times,
@@ -91,3 +92,28 @@ def test_sequence_normalization_equalizes_examples() -> None:
 
     assert token_reduced.item() == 1.75
     assert sequence_reduced.item() == 2.5
+
+
+def test_block_corruption_masks_future_targets_and_only_trains_active_block() -> None:
+    input_ids = torch.tensor([[2, 3, 4, 5, 6, 7]])
+    labels = torch.tensor([[-100, -100, 4, 5, 6, 7]])
+    corruption = build_block_corruption(
+        input_ids,
+        labels,
+        mask_token_id=9,
+        block_sizes=(2,),
+        time_epsilon=1e-3,
+        time_sampling="uniform",
+        mask_sampling="uniform-count",
+        loss_weighting="schedule",
+        generator=torch.Generator().manual_seed(3),
+    )
+
+    assert corruption.block_starts is not None
+    assert corruption.block_ends is not None
+    start = corruption.block_starts.item()
+    end = corruption.block_ends.item()
+    assert end - start <= 2
+    assert not corruption.target_mask[:, :start].any()
+    assert not corruption.target_mask[:, end:].any()
+    assert corruption.noised_ids[0, end:].eq(9).all()

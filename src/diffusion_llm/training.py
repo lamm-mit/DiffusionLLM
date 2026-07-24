@@ -16,7 +16,14 @@ import torch.nn.functional as F
 from transformers import Trainer, TrainingArguments, set_seed
 
 from diffusion_llm.collator import DiffusionDataCollator
-from diffusion_llm.corruption import build_full_corruption, reduce_diffusion_loss
+from diffusion_llm.corruption import (
+    build_block_corruption,
+    build_full_corruption,
+    parse_block_sizes,
+    reduce_diffusion_loss,
+    same_position_token_loss,
+    shifted_token_loss,
+)
 from diffusion_llm.data import load_splits, prepare_pretraining, prepare_sft
 from diffusion_llm.loading import load_model, load_tokenizer
 from diffusion_llm.schedule import loss_weight, mask_probability
@@ -59,6 +66,11 @@ class TrainConfig:
     time_sampling: str = "uniform"
     mask_sampling: str = "bernoulli"
     loss_normalization: str = "token"
+    prediction_parameterization: str = "same-position"
+    attention_pattern: str = "full-bidirectional"
+    train_block_sizes: str = "16,32,64"
+    full_mdlm_ratio: float = 0.25
+    ar_loss_weight: float = 0.0
     seed: int = 42
     bf16: bool = False
     fp16: bool = False
@@ -91,6 +103,11 @@ class MDLMTrainer(Trainer):
         time_sampling: str = "uniform",
         mask_sampling: str = "bernoulli",
         loss_normalization: str = "token",
+        prediction_parameterization: str = "same-position",
+        attention_pattern: str = "full-bidirectional",
+        train_block_sizes: str | list[int] | tuple[int, ...] = "16,32,64",
+        full_mdlm_ratio: float = 0.25,
+        ar_loss_weight: float = 0.0,
         **kwargs: Any,
     ):
         super().__init__(*args, **kwargs)
@@ -104,14 +121,29 @@ class MDLMTrainer(Trainer):
             raise ValueError("time_epsilon must lie in (0, 1).")
         if loss_weighting not in {"schedule", "uniform"}:
             raise ValueError("loss_weighting must be 'schedule' or 'uniform'.")
-        if objective not in {"legacy-mdlm", "mdlm-v2"}:
-            raise ValueError("objective must be 'legacy-mdlm' or 'mdlm-v2'.")
+        if objective not in {
+            "legacy-mdlm",
+            "mdlm-v2",
+            "block-mdlm",
+            "block-hybrid",
+        }:
+            raise ValueError("Unknown diffusion training objective.")
         if time_sampling not in {"uniform", "stratified"}:
             raise ValueError("time_sampling must be 'uniform' or 'stratified'.")
         if mask_sampling not in {"bernoulli", "uniform-count"}:
             raise ValueError("mask_sampling must be 'bernoulli' or 'uniform-count'.")
         if loss_normalization not in {"token", "sequence"}:
             raise ValueError("loss_normalization must be 'token' or 'sequence'.")
+        if prediction_parameterization not in {"same-position", "shifted"}:
+            raise ValueError("Unknown prediction parameterization.")
+        if attention_pattern not in {"full-bidirectional", "block-causal"}:
+            raise ValueError("Unknown diffusion attention pattern.")
+        if objective.startswith("block-") and attention_pattern != "block-causal":
+            raise ValueError("Block objectives require attention_pattern='block-causal'.")
+        if not 0 <= full_mdlm_ratio <= 1:
+            raise ValueError("full_mdlm_ratio must lie in [0, 1].")
+        if ar_loss_weight < 0:
+            raise ValueError("ar_loss_weight must be non-negative.")
         self.mask_token_id = mask_token_id
         self.time_epsilon = time_epsilon
         self.loss_weighting = loss_weighting
@@ -119,6 +151,11 @@ class MDLMTrainer(Trainer):
         self.time_sampling = time_sampling
         self.mask_sampling = mask_sampling
         self.loss_normalization = loss_normalization
+        self.prediction_parameterization = prediction_parameterization
+        self.attention_pattern = attention_pattern
+        self.train_block_sizes = parse_block_sizes(train_block_sizes)
+        self.full_mdlm_ratio = full_mdlm_ratio
+        self.ar_loss_weight = ar_loss_weight
 
     def compute_loss(
         self,
@@ -137,30 +174,69 @@ class MDLMTrainer(Trainer):
         input_ids = inputs["input_ids"]
         labels = inputs["labels"]
         attention_mask = inputs.get("attention_mask")
-        corruption = build_full_corruption(
-            input_ids,
-            labels,
-            mask_token_id=self.mask_token_id,
-            time_epsilon=self.time_epsilon,
-            time_sampling=self.time_sampling,
-            mask_sampling=self.mask_sampling,
-            loss_weighting=self.loss_weighting,
-        )
+        objective_labels = labels
+        if self.prediction_parameterization == "shifted":
+            objective_labels = labels.clone()
+            objective_labels[:, 0] = -100
+
+        use_block = self.objective == "block-mdlm"
+        if self.objective == "block-hybrid":
+            use_block = bool(
+                torch.rand((), device=input_ids.device) >= self.full_mdlm_ratio
+            )
+        if use_block:
+            corruption = build_block_corruption(
+                input_ids,
+                objective_labels,
+                mask_token_id=self.mask_token_id,
+                block_sizes=self.train_block_sizes,
+                time_epsilon=self.time_epsilon,
+                time_sampling=self.time_sampling,
+                mask_sampling=self.mask_sampling,
+                loss_weighting=self.loss_weighting,
+            )
+        else:
+            corruption = build_full_corruption(
+                input_ids,
+                objective_labels,
+                mask_token_id=self.mask_token_id,
+                time_epsilon=self.time_epsilon,
+                time_sampling=self.time_sampling,
+                mask_sampling=self.mask_sampling,
+                loss_weighting=self.loss_weighting,
+            )
+        model_kwargs: dict[str, torch.Tensor | bool | None] = {
+            "input_ids": corruption.noised_ids,
+            "attention_mask": attention_mask,
+            "use_cache": False,
+        }
+        if use_block:
+            model_kwargs["diffusion_block_starts"] = corruption.block_starts
+            model_kwargs["diffusion_block_ends"] = corruption.block_ends
         outputs = model(
-            input_ids=corruption.noised_ids,
-            attention_mask=attention_mask,
-            use_cache=False,
+            **model_kwargs,
         )
-        token_loss = F.cross_entropy(
-            outputs.logits.transpose(1, 2),
-            input_ids,
-            reduction="none",
-        )
+        if self.prediction_parameterization == "shifted":
+            token_loss = shifted_token_loss(outputs.logits, input_ids)
+        else:
+            token_loss = same_position_token_loss(outputs.logits, input_ids)
         loss = reduce_diffusion_loss(
             token_loss,
             corruption,
             normalization=self.loss_normalization,
         )
+        if use_block and self.ar_loss_weight and corruption.original_target_mask is not None:
+            positions = torch.arange(
+                input_ids.shape[1],
+                device=input_ids.device,
+            )[None, :]
+            ar_mask = corruption.original_target_mask & positions.gt(0)
+            assert corruption.block_starts is not None
+            ar_mask &= positions < corruption.block_starts[:, None]
+            if ar_mask.any():
+                ar_token_loss = shifted_token_loss(outputs.logits, input_ids)
+                ar_loss = (ar_token_loss * ar_mask).sum() / ar_mask.sum()
+                loss = loss + self.ar_loss_weight * ar_loss
         return (loss, outputs) if return_outputs else loss
 
     def _compute_legacy_loss(
@@ -302,6 +378,15 @@ def train(config: TrainConfig) -> Path:
     model.config.diffusion_method = "mdlm"
     model.config.mask_token_id = tokenizer.mask_token_id
     model.config.use_cache = False
+    model.config.diffusion_prediction_parameterization = (
+        config.prediction_parameterization
+    )
+    model.config.diffusion_attention_pattern = config.attention_pattern
+    model.config.diffusion_training_version = (
+        1 if config.objective == "legacy-mdlm" else 2
+    )
+    if hasattr(model, "model"):
+        model.model.config = model.config
     model = _apply_lora(model, config)
 
     train_dataset, eval_dataset = load_splits(
@@ -351,6 +436,11 @@ def train(config: TrainConfig) -> Path:
         time_sampling=config.time_sampling,
         mask_sampling=config.mask_sampling,
         loss_normalization=config.loss_normalization,
+        prediction_parameterization=config.prediction_parameterization,
+        attention_pattern=config.attention_pattern,
+        train_block_sizes=config.train_block_sizes,
+        full_mdlm_ratio=config.full_mdlm_ratio,
+        ar_loss_weight=config.ar_loss_weight,
     )
     trainer.train(resume_from_checkpoint=config.resume_from_checkpoint)
     (output_dir / "training_config.json").write_text(

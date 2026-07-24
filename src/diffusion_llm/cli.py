@@ -198,6 +198,16 @@ def build_parser() -> argparse.ArgumentParser:
     convert.add_argument("--random-init", action="store_true")
     convert.add_argument("--trust-remote-code", action="store_true")
     convert.add_argument("--overwrite", action="store_true")
+    convert.add_argument(
+        "--prediction-parameterization",
+        choices=("same-position", "shifted"),
+        default="same-position",
+    )
+    convert.add_argument(
+        "--attention-pattern",
+        choices=("full-bidirectional", "block-causal"),
+        default="full-bidirectional",
+    )
     convert.set_defaults(handler=_run_convert)
 
     train_parser = commands.add_parser("train", help="Pretrain or SFT a converted model.")
@@ -249,7 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train_parser.add_argument(
         "--objective",
-        choices=("legacy-mdlm", "mdlm-v2"),
+        choices=("legacy-mdlm", "mdlm-v2", "block-mdlm", "block-hybrid"),
         default="legacy-mdlm",
         help="Legacy behavior is unchanged; mdlm-v2 enables explicit v2 corruption.",
     )
@@ -268,6 +278,19 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("token", "sequence"),
         default="token",
     )
+    train_parser.add_argument(
+        "--prediction-parameterization",
+        choices=("same-position", "shifted"),
+        default="same-position",
+    )
+    train_parser.add_argument(
+        "--attention-pattern",
+        choices=("full-bidirectional", "block-causal"),
+        default="full-bidirectional",
+    )
+    train_parser.add_argument("--train-block-sizes", default="16,32,64")
+    train_parser.add_argument("--full-mdlm-ratio", type=float, default=0.25)
+    train_parser.add_argument("--ar-loss-weight", type=float, default=0.0)
     train_parser.add_argument("--seed", type=int, default=42)
     train_parser.add_argument("--bf16", action="store_true")
     train_parser.add_argument("--fp16", action="store_true")
@@ -479,6 +502,8 @@ def _run_convert(args: argparse.Namespace) -> None:
         random_init=args.random_init,
         trust_remote_code=args.trust_remote_code,
         overwrite=args.overwrite,
+        prediction_parameterization=args.prediction_parameterization,
+        attention_pattern=args.attention_pattern,
     )
     print(f"Converted diffusion checkpoint: {output}")
 
